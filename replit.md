@@ -1,10 +1,11 @@
-# [Project name]
+# ROBELLANK 은행 봇
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+Discord 서버에서 가상 통화·계좌와 길드 가상주식 시장을 운영하는 한국어 슬래시 명령 봇입니다.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
+- `pnpm --filter @workspace/api-server run dev` — run the API server (port 8080)
+- `pnpm --filter @workspace/robellank-bankbot run dev` — run the ROBELLANK Discord bank bot
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
@@ -22,23 +23,32 @@ _Replace the heading above with the project's name, and this line with one sente
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/robellank-bankbot` — Discord slash commands, interaction handlers, bank and market operations, and Korean command guide
+- `lib/db/src/schema/index.ts` — PostgreSQL schema for accounts, currencies, transactions, loans, stocks, orders, evaluations, and news
+- `artifacts/api-server` — shared API scaffold, separate from the Discord bot process
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Discord gateway bot runs as a dedicated console workflow; it does not depend on the API server process.
+- Market scores and user-entered evidence are stored separately from the trading ledger; unpublished evaluations can be corrected before publication.
+- Buy order funds are escrowed; open orders are refunded when cancelled or at the daily market close.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+- Server-scoped bank accounts, wallet/deposit balances, transfers, currency exchange, daily interest, approval-based loans, and transaction history.
+- Guild stock listings, user-to-user limit orders, portfolios, 7.5% sell fees, daily score-based price changes, and market announcements.
+- Administrator controls for currencies, account freezes, money supply, loans, listings, share issuance, scoring, and announcements.
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- The bot's user-facing commands and messages should be in Korean.
+- The investment system is a guild virtual-stock exchange based on the supplied ROBELLANK operating rules, not fixed-term investment products.
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- Currency rates and interest are defined as values per one unit of currency; interest accrues daily at 00:00 Asia/Seoul.
+- Only Discord server administrators can use administrative bank and market commands.
+- To deliver a user-to-user stock market, accounts need to be registered and initial shares need to be assigned to a holder who can place sell orders.
 
 ## Pointers
 
