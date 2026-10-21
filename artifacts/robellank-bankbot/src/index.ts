@@ -353,8 +353,9 @@ function helpEmbed() {
         "예금·대출 이자는 매일 한국 시간 자정에 계산됩니다.",
         "",
         "**길드 가상주식**",
-        "`/stock list` 종목 목록 · `/stock quote stock` 상세 정보 · `/stock buy stock shares limit_price` 매수",
-        "`/stock sell stock shares limit_price` 매도 · `/stock orders` 주문 현황 · `/stock cancel order_id` 취소",
+        "`/stock list` 종목 목록 · `/stock table` 전체 종목 표 · `/stock quote stock` 상세 정보",
+        "`/stock buy stock shares limit_price` 매수 · `/stock sell stock shares limit_price` 매도",
+        "`/stock orders` 주문 현황 · `/stock cancel order_id` 취소",
         "`/portfolio` 보유 현황 · `/market news` 최근 공지",
         "종목은 티커 없이 이름으로 찾습니다. 상세 정보에는 기준가, 시가총액, 최고 매수·매도 호가, 최근 체결, 세부 평가가 표시됩니다.",
         "주문은 유저 간 지정가로만 체결됩니다. 현재 기준가는 참고값이며 실제 체결가는 매칭된 주문 가격입니다. 매수 수수료 0%, 매도 수수료 7.5%(정수 반올림)입니다.",
@@ -753,10 +754,84 @@ async function handleBankRequest(
 async function handleStock(interaction: ChatInputCommandInteraction) {
   const guildId = guildIdFrom(interaction);
   const subcommand = interaction.options.getSubcommand();
-  if (subcommand === "list") {
+  if (subcommand === "list" || subcommand === "table") {
     const rows = await store.listStocks(guildId);
     if (!rows.length) {
       await replyPrivate(interaction, "상장 종목이 없습니다.");
+      return;
+    }
+    if (subcommand === "table") {
+      const displayWidth = (value: string) =>
+        [...value].reduce(
+          (width, character) =>
+            width +
+            (/\p{Script=Hangul}|\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}/u.test(
+              character,
+            )
+              ? 2
+              : 1),
+          0,
+        );
+      const columns = [
+        { heading: "번호", value: (_stock: (typeof rows)[number], index: number) => String(index + 1), right: true },
+        { heading: "종목 이름", value: (stock: (typeof rows)[number]) => stock.name, right: false },
+        { heading: "기준가", value: (stock: (typeof rows)[number]) => format(stock.current_price), right: true },
+        {
+          heading: "일간 변동",
+          value: (stock: (typeof rows)[number]) =>
+            stock.change_percent === null
+              ? "평가 전"
+              : `${signed(stock.change_percent)}%`,
+          right: true,
+        },
+        { heading: "유통량", value: (stock: (typeof rows)[number]) => `${format(stock.total_shares)}주`, right: true },
+        { heading: "시가총액", value: (stock: (typeof rows)[number]) => format(stock.market_cap), right: true },
+      ];
+      const pageSize = 12;
+      const pages: EmbedBuilder[] = [];
+      for (let offset = 0; offset < rows.length; offset += pageSize) {
+        const pageRows = rows.slice(offset, offset + pageSize);
+        const pageNumber = pages.length + 1;
+        const pageCount = Math.ceil(rows.length / pageSize);
+        const values = columns.map((column) => [
+          column.heading,
+          ...pageRows.map((stock, index) =>
+            column.value(stock, offset + index),
+          ),
+        ]);
+        const widths = columns.map((column, index) =>
+          Math.max(...values[index].map(displayWidth)),
+        );
+        const pad = (value: string, width: number, right: boolean) => {
+          const spaces = " ".repeat(Math.max(0, width - displayWidth(value)));
+          return right ? `${spaces}${value}` : `${value}${spaces}`;
+        };
+        const tableLines = values[0].map((_, rowIndex) =>
+          values
+            .map((column, columnIndex) =>
+              pad(column[rowIndex], widths[columnIndex], columns[columnIndex].right),
+            )
+            .join("  "),
+        );
+        const table = `\`\`\`text\n${tableLines.join("\n")}\n\`\`\``;
+        pages.push(
+          new EmbedBuilder()
+            .setColor(0x207e66)
+            .setTitle(`전체 주식 시세표 · ${pageNumber}/${pageCount}`)
+            .setDescription(
+              `${table}\n기준가·시가총액은 참고값이며, 실제 체결가는 주문 매칭 결과에 따릅니다.`,
+            )
+            .setFooter({ text: `상장 종목 ${rows.length}개 · 이름순 정렬` }),
+        );
+      }
+      for (const [index, page] of pages.entries()) {
+        const payload = {
+          embeds: [page],
+          flags: MessageFlags.Ephemeral as const,
+        };
+        if (index === 0) await interaction.reply(payload);
+        else await interaction.followUp(payload);
+      }
       return;
     }
     const embed = new EmbedBuilder()

@@ -466,6 +466,9 @@ export const commands = [
     .setDescription("길드 가상주식 조회·주문")
     .addSubcommand((sub) => sub.setName("list").setDescription("상장 종목 목록"))
     .addSubcommand((sub) =>
+      sub.setName("table").setDescription("상장된 모든 종목을 표로 확인합니다"),
+    )
+    .addSubcommand((sub) =>
       sub
         .setName("quote")
         .setDescription("종목 소개·시세·호가·평가를 자세히 확인합니다")

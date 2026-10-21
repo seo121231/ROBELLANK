@@ -23,6 +23,7 @@ Discord 슬래시 명령으로 운영하는 서버별 가상 은행과 길드 �
 | `/tier` | 현재 등급·신용점수·대출 한도·혜택 확인 |
 | `/currency list` | 활성 재화, 환전가치, 일일 이자율 확인 |
 | `/stock list` | 상장 종목과 현재 기준 주가 확인 |
+| `/stock table` | 상장된 모든 종목의 기준가·일간 변동·유통량·시가총액을 표로 확인 |
 | `/stock quote stock` | 종목 소개, 기준가, 시가총액, 호가, 최근 체결, 세부 평가 확인 |
 | `/stock buy stock shares limit_price` | 종목 이름으로 지정가 매수. 주문 금액을 지갑에서 먼저 확보 |
 | `/stock sell stock shares limit_price` | 종목 이름으로 보유 주식 지정가 매도 |
