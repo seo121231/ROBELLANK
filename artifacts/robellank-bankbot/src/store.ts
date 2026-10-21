@@ -1,8 +1,50 @@
 import { pool } from "@workspace/db";
 import type { PoolClient } from "pg";
 import { randomInt } from "node:crypto";
+import { getTier, tierAtLeast, type TierKey } from "./tiers";
 
 type Queryable = Pick<PoolClient, "query">;
+export type TierSettingKey =
+  | "platinum_loan_bonus"
+  | "vip_deposit_rate_bonus"
+  | "bronze_storage_limit"
+  | "silver_storage_limit"
+  | "gold_storage_limit"
+  | "platinum_storage_limit"
+  | "ace_storage_limit"
+  | "vip_storage_limit"
+  | "loan_term_days"
+  | "loan_extension_days"
+  | "loan_extension_limit";
+
+const tierSettingColumns: Record<TierSettingKey, string> = {
+  platinum_loan_bonus: "platinum_loan_bonus",
+  vip_deposit_rate_bonus: "vip_deposit_rate_bonus",
+  bronze_storage_limit: "bronze_storage_limit",
+  silver_storage_limit: "silver_storage_limit",
+  gold_storage_limit: "gold_storage_limit",
+  platinum_storage_limit: "platinum_storage_limit",
+  ace_storage_limit: "ace_storage_limit",
+  vip_storage_limit: "vip_storage_limit",
+  loan_term_days: "loan_term_days",
+  loan_extension_days: "loan_extension_days",
+  loan_extension_limit: "loan_extension_limit",
+};
+
+type TierSettingsRow = {
+  platinum_loan_bonus: string;
+  vip_deposit_rate_bonus: string;
+  bronze_storage_limit: number;
+  silver_storage_limit: number;
+  gold_storage_limit: number;
+  platinum_storage_limit: number;
+  ace_storage_limit: number;
+  vip_storage_limit: number;
+  loan_term_days: number;
+  loan_extension_days: number;
+  loan_extension_limit: number;
+};
+
 type CurrencyRow = {
   id: number;
   name: string;
@@ -13,6 +55,9 @@ type CurrencyRow = {
   is_base: boolean;
   active: boolean;
 };
+
+const formatInteger = (value: number) =>
+  new Intl.NumberFormat("ko-KR", { maximumFractionDigits: 0 }).format(value);
 
 export async function inTransaction<T>(
   action: (client: PoolClient) => Promise<T>,
@@ -110,8 +155,10 @@ async function getAccount(
   const result = await queryable.query<{
     id: number;
     frozen: boolean;
+    tier_key: TierKey;
+    credit_score: number;
   }>(
-    `SELECT id, frozen FROM bank_accounts
+    `SELECT id, frozen, tier_key, credit_score FROM bank_accounts
       WHERE guild_id = $1 AND discord_user_id = $2
       LIMIT 1${lock ? " FOR UPDATE" : ""}`,
     [guildId, discordUserId],
@@ -160,6 +207,342 @@ async function baseCurrency(guildId: string, queryable: Queryable = pool) {
     [guildId],
   );
   return existing.rows[0] ?? ensureBaseCurrency(guildId, queryable);
+}
+
+async function ensureTierSettings(
+  guildId: string,
+  queryable: Queryable = pool,
+): Promise<TierSettingsRow> {
+  await queryable.query(
+    `INSERT INTO bank_tier_settings (guild_id)
+     VALUES ($1) ON CONFLICT (guild_id) DO NOTHING`,
+    [guildId],
+  );
+  const result = await queryable.query<TierSettingsRow>(
+    `SELECT platinum_loan_bonus, vip_deposit_rate_bonus,
+            bronze_storage_limit, silver_storage_limit, gold_storage_limit,
+            platinum_storage_limit, ace_storage_limit, vip_storage_limit,
+            loan_term_days, loan_extension_days, loan_extension_limit
+       FROM bank_tier_settings WHERE guild_id = $1`,
+    [guildId],
+  );
+  return result.rows[0];
+}
+
+export async function syncTierSnapshot(
+  guildId: string,
+  discordUserId: string,
+  tierKey: TierKey,
+) {
+  await pool.query(
+    `UPDATE bank_accounts SET tier_key = $1
+      WHERE guild_id = $2 AND discord_user_id = $3`,
+    [tierKey, guildId, discordUserId],
+  );
+}
+
+export async function setTierSetting(
+  guildId: string,
+  actorDiscordUserId: string,
+  key: TierSettingKey,
+  value: number,
+  reason: string,
+) {
+  const column = tierSettingColumns[key];
+  return inTransaction(async (client) => {
+    const settings = await ensureTierSettings(guildId, client);
+    const oldValue = String(settings[key as keyof TierSettingsRow]);
+    await client.query(
+      `UPDATE bank_tier_settings
+          SET ${column} = $1, updated_at = now()
+        WHERE guild_id = $2`,
+      [value, guildId],
+    );
+    await client.query(
+      `INSERT INTO bank_tier_setting_history
+         (guild_id, actor_discord_user_id, setting_key, old_value, new_value, reason)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [guildId, actorDiscordUserId, key, oldValue, String(value), reason],
+    );
+    return { key, oldValue, value };
+  });
+}
+
+export async function setCreditScore(
+  guildId: string,
+  actorDiscordUserId: string,
+  targetDiscordUserId: string,
+  score: number,
+  reason: string,
+) {
+  return inTransaction(async (client) => {
+    const account = await getAccount(
+      guildId,
+      targetDiscordUserId,
+      client,
+      true,
+      true,
+    );
+    await client.query(
+      `UPDATE bank_accounts SET credit_score = $1 WHERE id = $2`,
+      [score, account.id],
+    );
+    await client.query(
+      `INSERT INTO bank_credit_score_history
+         (guild_id, actor_discord_user_id, target_discord_user_id, old_score, new_score, reason)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        guildId,
+        actorDiscordUserId,
+        targetDiscordUserId,
+        account.credit_score,
+        score,
+        reason,
+      ],
+    );
+    return { oldScore: account.credit_score, score };
+  });
+}
+
+export async function getTierSummary(
+  guildId: string,
+  discordUserId: string,
+  tierKey: TierKey,
+) {
+  const account = await getAccount(guildId, discordUserId, pool, false, true);
+  const settings = await ensureTierSettings(guildId);
+  const currency = await getCurrency(guildId, "벨");
+  const exposure = await pool.query<{ total: string }>(
+    `SELECT COALESCE(SUM(
+              CASE WHEN status = 'approved' THEN amount_due ELSE principal END
+            ), 0)::text AS total
+       FROM bank_loans
+      WHERE guild_id = $1 AND account_id = $2 AND currency_id = $3
+        AND loan_type = 'credit' AND status IN ('pending', 'approved')`,
+    [guildId, account.id, currency.id],
+  );
+  const limit =
+    account.credit_score * 10_000 +
+    (tierAtLeast(tierKey, "platinum")
+      ? Number(settings.platinum_loan_bonus)
+      : 0);
+  return {
+    tier: getTier(tierKey),
+    creditScore: account.credit_score,
+    creditLimit: limit,
+    creditUsed: Number(exposure.rows[0].total),
+    settings,
+  };
+}
+
+export async function listVaultItems(guildId: string, discordUserId: string) {
+  const account = await getAccount(guildId, discordUserId, pool, false, true);
+  const result = await pool.query(
+    `SELECT item_name, quantity FROM bank_vault_items
+      WHERE account_id = $1 AND quantity > 0
+      ORDER BY lower(item_name)`,
+    [account.id],
+  );
+  const settings = await ensureTierSettings(guildId);
+  const column = `${account.tier_key}_storage_limit` as keyof TierSettingsRow;
+  return {
+    items: result.rows as { item_name: string; quantity: number }[],
+    capacity: Number(settings[column]),
+    tier: getTier(account.tier_key),
+  };
+}
+
+export async function adjustVault(
+  guildId: string,
+  actorDiscordUserId: string,
+  targetDiscordUserId: string,
+  itemName: string,
+  quantity: number,
+  operation: "add" | "remove",
+  reason: string,
+) {
+  const normalizedName = itemName.trim().normalize("NFKC");
+  if (!normalizedName) throw new Error("아이템 이름을 입력하세요.");
+  const itemKey = normalizedName.toLocaleLowerCase("ko-KR");
+  return inTransaction(async (client) => {
+    const account = await getAccount(
+      guildId,
+      targetDiscordUserId,
+      client,
+      true,
+      true,
+    );
+    const settings = await ensureTierSettings(guildId, client);
+    const column = `${account.tier_key}_storage_limit` as keyof TierSettingsRow;
+    const capacity = Number(settings[column]);
+    const current = await client.query<{ total: string }>(
+      `SELECT COALESCE(SUM(quantity), 0)::text AS total
+         FROM bank_vault_items WHERE account_id = $1`,
+      [account.id],
+    );
+    if (operation === "add") {
+      if (capacity <= 0) {
+        throw new Error("이 등급의 보관 한도가 설정되지 않았습니다. 관리자에게 문의하세요.");
+      }
+      if (Number(current.rows[0].total) + quantity > capacity) {
+        throw new Error(
+          `보관 한도를 초과합니다. 현재 ${current.rows[0].total}개 / 한도 ${capacity}개.`,
+        );
+      }
+      await client.query(
+        `INSERT INTO bank_vault_items
+           (account_id, item_key, item_name, quantity)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (account_id, item_key) DO UPDATE
+           SET item_name = EXCLUDED.item_name,
+               quantity = bank_vault_items.quantity + EXCLUDED.quantity,
+               updated_at = now()`,
+        [account.id, itemKey, normalizedName, quantity],
+      );
+    } else {
+      const row = await client.query<{ id: number; quantity: number }>(
+        `SELECT id, quantity FROM bank_vault_items
+          WHERE account_id = $1 AND item_key = $2 FOR UPDATE`,
+        [account.id, itemKey],
+      );
+      if (!row.rows[0] || row.rows[0].quantity < quantity) {
+        throw new Error("은행 보관 수량이 부족합니다.");
+      }
+      const remaining = row.rows[0].quantity - quantity;
+      if (remaining === 0) {
+        await client.query(`DELETE FROM bank_vault_items WHERE id = $1`, [
+          row.rows[0].id,
+        ]);
+      } else {
+        await client.query(
+          `UPDATE bank_vault_items SET quantity = $1, updated_at = now() WHERE id = $2`,
+          [remaining, row.rows[0].id],
+        );
+      }
+    }
+    await client.query(
+      `INSERT INTO bank_vault_history
+         (guild_id, actor_discord_user_id, target_discord_user_id, item_name,
+          quantity, operation, reason)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        guildId,
+        actorDiscordUserId,
+        targetDiscordUserId,
+        normalizedName,
+        quantity,
+        operation,
+        reason,
+      ],
+    );
+    return { tier: getTier(account.tier_key), capacity };
+  });
+}
+
+export async function createBankItemRequest(
+  guildId: string,
+  discordUserId: string,
+  itemName: string,
+  quantity: number,
+  note: string,
+  tierKey: TierKey,
+) {
+  if (!tierAtLeast(tierKey, "platinum")) {
+    throw new Error("은행 의뢰는 플레티넘 등급 이상부터 이용할 수 있습니다.");
+  }
+  const normalizedItem = itemName.trim().normalize("NFKC");
+  if (!normalizedItem) throw new Error("아이템·재료 이름을 입력하세요.");
+  return inTransaction(async (client) => {
+    const account = await getAccount(guildId, discordUserId, client, true);
+    await client.query(
+      `UPDATE bank_accounts SET tier_key = $1 WHERE id = $2`,
+      [tierKey, account.id],
+    );
+    const active = await client.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count
+         FROM bank_item_requests
+        WHERE guild_id = $1 AND discord_user_id = $2
+          AND status IN ('pending', 'accepted')`,
+      [guildId, discordUserId],
+    );
+    if (Number(active.rows[0].count) >= 5) {
+      throw new Error("진행 중인 은행 의뢰는 사용자당 최대 5건까지 가능합니다.");
+    }
+    const result = await client.query<{ id: number }>(
+      `INSERT INTO bank_item_requests
+         (guild_id, discord_user_id, item_name, quantity, note)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id`,
+      [guildId, discordUserId, normalizedItem, quantity, note.trim()],
+    );
+    return { requestId: result.rows[0].id };
+  });
+}
+
+export async function listBankItemRequests(
+  guildId: string,
+  discordUserId?: string,
+) {
+  const result = discordUserId
+    ? await pool.query(
+        `SELECT id, discord_user_id, item_name, quantity, note, status,
+                review_note, created_at
+           FROM bank_item_requests
+          WHERE guild_id = $1 AND discord_user_id = $2
+          ORDER BY created_at DESC LIMIT 20`,
+        [guildId, discordUserId],
+      )
+    : await pool.query(
+        `SELECT id, discord_user_id, item_name, quantity, note, status,
+                review_note, created_at
+           FROM bank_item_requests
+          WHERE guild_id = $1 AND status IN ('pending', 'accepted')
+          ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, created_at
+          LIMIT 50`,
+        [guildId],
+      );
+  return result.rows;
+}
+
+export async function updateBankItemRequest(
+  guildId: string,
+  actorDiscordUserId: string,
+  requestId: number,
+  status: "accepted" | "declined" | "fulfilled",
+  reviewNote: string,
+) {
+  return inTransaction(async (client) => {
+    const result = await client.query<{
+      id: number;
+      discord_user_id: string;
+      item_name: string;
+      quantity: number;
+      status: string;
+    }>(
+      `SELECT id, discord_user_id, item_name, quantity, status
+         FROM bank_item_requests
+        WHERE id = $1 AND guild_id = $2
+        FOR UPDATE`,
+      [requestId, guildId],
+    );
+    const request = result.rows[0];
+    if (!request) throw new Error("은행 의뢰를 찾을 수 없습니다.");
+    const validTransition =
+      (request.status === "pending" &&
+        (status === "accepted" || status === "declined")) ||
+      (request.status === "accepted" &&
+        (status === "fulfilled" || status === "declined"));
+    if (!validTransition) {
+      throw new Error("현재 상태에서 해당 의뢰 상태로 변경할 수 없습니다.");
+    }
+    await client.query(
+      `UPDATE bank_item_requests
+          SET status = $1, review_note = $2, reviewed_by = $3, reviewed_at = now()
+        WHERE id = $4`,
+      [status, reviewNote, actorDiscordUserId, requestId],
+    );
+    return { ...request, status };
+  });
 }
 
 export async function registerAccount(guildId: string, discordUserId: string) {
@@ -610,20 +993,108 @@ export async function getSupply(guildId: string, currencyName: string) {
   return { currency: currencyRow, total: result.rows[0].total };
 }
 
-export async function createLoanRequest(
+export async function createCreditLoanRequest(
   guildId: string,
   discordUserId: string,
   currencyName: string,
   amount: number,
+  tierKey: TierKey,
 ) {
+  if (!tierAtLeast(tierKey, "gold")) {
+    throw new Error("신용 대출은 골드 등급 이상부터 신청할 수 있습니다.");
+  }
   return inTransaction(async (client) => {
     const account = await getAccount(guildId, discordUserId, client, true);
+    await client.query(
+      `UPDATE bank_accounts SET tier_key = $1 WHERE id = $2`,
+      [tierKey, account.id],
+    );
     const currencyRow = await getCurrency(guildId, currencyName, client, true);
+    if (currencyRow.name !== "벨") {
+      throw new Error("신용 대출은 벨로만 신청할 수 있습니다.");
+    }
+    const settings = await ensureTierSettings(guildId, client);
+    const creditLimit =
+      account.credit_score * 10_000 +
+      (tierAtLeast(tierKey, "platinum")
+        ? Number(settings.platinum_loan_bonus)
+        : 0);
+    const exposure = await client.query<{ total: string }>(
+      `SELECT COALESCE(SUM(
+                CASE WHEN status = 'approved' THEN amount_due ELSE principal END
+              ), 0)::text AS total
+         FROM bank_loans
+        WHERE guild_id = $1 AND account_id = $2 AND currency_id = $3
+          AND loan_type = 'credit' AND status IN ('pending', 'approved')`,
+      [guildId, account.id, currencyRow.id],
+    );
+    const available = creditLimit - Number(exposure.rows[0].total);
+    if (amount > available) {
+      throw new Error(
+        `신용 대출 한도를 초과합니다. 신용점수 ${account.credit_score}점 기준 한도 ${formatInteger(creditLimit)}벨, 사용 중 ${formatInteger(Number(exposure.rows[0].total))}벨입니다.`,
+      );
+    }
     const result = await client.query<{ id: number }>(
       `INSERT INTO bank_loans
-         (guild_id, account_id, currency_id, principal, amount_due, rate, status)
-       VALUES ($1, $2, $3, $4, $4, $5, 'pending') RETURNING id`,
-      [guildId, account.id, currencyRow.id, amount, currencyRow.loan_rate],
+         (guild_id, account_id, currency_id, principal, amount_due, rate,
+          status, loan_type, requested_tier)
+       VALUES ($1, $2, $3, $4, $4, $5, 'pending', 'credit', $6)
+       RETURNING id`,
+      [
+        guildId,
+        account.id,
+        currencyRow.id,
+        amount,
+        currencyRow.loan_rate,
+        tierKey,
+      ],
+    );
+    return {
+      loanId: result.rows[0].id,
+      currency: currencyRow,
+      creditLimit,
+      available: available - amount,
+    };
+  });
+}
+
+export async function createCollateralLoanRequest(
+  guildId: string,
+  discordUserId: string,
+  itemName: string,
+  quantity: number,
+  amount: number,
+  tierKey: TierKey,
+) {
+  if (!tierAtLeast(tierKey, "silver")) {
+    throw new Error("담보 대출은 실버 등급 이상부터 신청할 수 있습니다.");
+  }
+  const normalizedItem = itemName.trim().normalize("NFKC");
+  if (!normalizedItem) throw new Error("담보 아이템 이름을 입력하세요.");
+  return inTransaction(async (client) => {
+    const account = await getAccount(guildId, discordUserId, client, true);
+    await client.query(
+      `UPDATE bank_accounts SET tier_key = $1 WHERE id = $2`,
+      [tierKey, account.id],
+    );
+    const currencyRow = await getCurrency(guildId, "벨", client, true);
+    const result = await client.query<{ id: number }>(
+      `INSERT INTO bank_loans
+         (guild_id, account_id, currency_id, principal, amount_due, rate,
+          status, loan_type, requested_tier, collateral_item, collateral_quantity,
+          collateral_status)
+       VALUES ($1, $2, $3, $4, $4, $5, 'pending', 'collateral', $6, $7, $8, 'pending')
+       RETURNING id`,
+      [
+        guildId,
+        account.id,
+        currencyRow.id,
+        amount,
+        currencyRow.loan_rate,
+        tierKey,
+        normalizedItem,
+        quantity,
+      ],
     );
     return { loanId: result.rows[0].id, currency: currencyRow };
   });
@@ -635,6 +1106,7 @@ export async function reviewLoan(
   loanId: number,
   approve: boolean,
   reason = "",
+  verifiedCollateralValue?: number,
 ) {
   return inTransaction(async (client) => {
     const actor = await getOrCreateAccount(guildId, actorUserId, client);
@@ -644,8 +1116,18 @@ export async function reviewLoan(
       currency_id: number;
       principal: string;
       status: string;
+      loan_type: string;
+      requested_tier: TierKey;
+      collateral_item: string | null;
+      collateral_quantity: number | null;
+      collateral_status: string;
+      discord_user_id: string;
+      credit_score: number;
     }>(
-      `SELECT l.id, l.account_id, l.currency_id, l.principal, l.status
+      `SELECT l.id, l.account_id, l.currency_id, l.principal, l.status,
+              l.loan_type, l.requested_tier, l.collateral_item,
+              l.collateral_quantity, l.collateral_status,
+              a.discord_user_id, a.credit_score
          FROM bank_loans l JOIN bank_accounts a ON a.id = l.account_id
         WHERE l.id = $1 AND l.guild_id = $2 FOR UPDATE`,
       [loanId, guildId],
@@ -655,19 +1137,64 @@ export async function reviewLoan(
       throw new Error("대기 중인 대출 신청을 찾을 수 없습니다.");
     }
     if (approve) {
+      if (loan.loan_type === "collateral") {
+        if (!verifiedCollateralValue || verifiedCollateralValue <= 0) {
+          throw new Error("관리자가 게임에서 확인한 담보 가치를 입력해야 합니다.");
+        }
+        if (Number(loan.principal) > verifiedCollateralValue) {
+          throw new Error("신청 금액이 확인된 담보 가치보다 큽니다.");
+        }
+      } else if (verifiedCollateralValue !== undefined) {
+        throw new Error("신용 대출 승인에는 담보 가치를 입력할 수 없습니다.");
+      }
       const borrower = await client.query<{ frozen: boolean }>(
         `SELECT frozen FROM bank_accounts WHERE id = $1 FOR UPDATE`,
         [loan.account_id],
       );
       if (borrower.rows[0]?.frozen) throw new Error("동결된 계좌에는 대출을 지급할 수 없습니다.");
+      if (loan.loan_type === "credit") {
+        if (!tierAtLeast(loan.requested_tier, "gold")) {
+          throw new Error("신용 대출은 골드 등급 이상만 승인할 수 있습니다.");
+        }
+        const settings = await ensureTierSettings(guildId, client);
+        const creditLimit =
+          loan.credit_score * 10_000 +
+          (tierAtLeast(loan.requested_tier, "platinum")
+            ? Number(settings.platinum_loan_bonus)
+            : 0);
+        const otherExposure = await client.query<{ total: string }>(
+          `SELECT COALESCE(SUM(
+                    CASE WHEN status = 'approved' THEN amount_due ELSE principal END
+                  ), 0)::text AS total
+             FROM bank_loans
+            WHERE guild_id = $1 AND account_id = $2 AND currency_id = $3
+              AND loan_type = 'credit' AND status IN ('pending', 'approved')
+              AND id <> $4`,
+          [guildId, loan.account_id, loan.currency_id, loan.id],
+        );
+        if (
+          Number(otherExposure.rows[0].total) + Number(loan.principal) >
+          creditLimit
+        ) {
+          throw new Error("현재 신용 대출 한도를 초과해 승인할 수 없습니다.");
+        }
+      }
+      const settings = await ensureTierSettings(guildId, client);
+      const termDays = Number(settings.loan_term_days);
+      const dueAt =
+        termDays > 0 ? new Date(Date.now() + termDays * 86_400_000) : null;
       await ensureBalance(loan.account_id, loan.currency_id, client);
       await client.query(
         `UPDATE bank_balances SET wallet = wallet + $1 WHERE account_id = $2 AND currency_id = $3`,
         [loan.principal, loan.account_id, loan.currency_id],
       );
       await client.query(
-        `UPDATE bank_loans SET status = 'approved', reviewed_at = now() WHERE id = $1`,
-        [loan.id],
+        `UPDATE bank_loans
+            SET status = 'approved', reviewed_at = now(), due_at = $2,
+                collateral_value = $3,
+                collateral_status = CASE WHEN loan_type = 'collateral' THEN 'held' ELSE 'none' END
+          WHERE id = $1`,
+        [loan.id, dueAt, verifiedCollateralValue ?? null],
       );
       await recordTransaction(client, {
         guildId,
@@ -680,7 +1207,10 @@ export async function reviewLoan(
       });
     } else {
       await client.query(
-        `UPDATE bank_loans SET status = 'rejected', reviewed_at = now() WHERE id = $1`,
+        `UPDATE bank_loans
+            SET status = 'rejected', reviewed_at = now(),
+                collateral_status = CASE WHEN loan_type = 'collateral' THEN 'rejected' ELSE 'none' END
+          WHERE id = $1`,
         [loan.id],
       );
       await recordTransaction(client, {
@@ -700,13 +1230,156 @@ export async function reviewLoan(
 export async function listLoans(guildId: string, discordUserId: string) {
   const account = await getAccount(guildId, discordUserId, pool, false, true);
   const result = await pool.query(
-    `SELECT l.id, c.name AS currency, l.principal, l.amount_due, l.rate, l.status, l.created_at
+    `SELECT l.id, c.name AS currency, l.principal, l.amount_due, l.rate,
+            l.status, l.loan_type, l.collateral_item, l.collateral_quantity,
+            l.collateral_value, l.collateral_status, l.due_at,
+            l.extension_count, l.created_at
        FROM bank_loans l JOIN bank_currencies c ON c.id = l.currency_id
       WHERE l.guild_id = $1 AND l.account_id = $2
       ORDER BY l.id DESC LIMIT 15`,
     [guildId, account.id],
   );
   return result.rows;
+}
+
+export async function listLoanQueue(guildId: string) {
+  const result = await pool.query(
+    `SELECT l.id, a.discord_user_id, l.loan_type, l.requested_tier,
+            l.principal, l.collateral_item, l.collateral_quantity, l.created_at
+       FROM bank_loans l
+       JOIN bank_accounts a ON a.id = l.account_id
+      WHERE l.guild_id = $1 AND l.status = 'pending'
+      ORDER BY CASE l.requested_tier
+                 WHEN 'vip' THEN 0
+                 WHEN 'ace' THEN 1
+                 ELSE 2
+               END,
+               l.created_at ASC
+      LIMIT 30`,
+    [guildId],
+  );
+  return result.rows;
+}
+
+export async function extendLoan(
+  guildId: string,
+  discordUserId: string,
+  loanId: number,
+  tierKey: TierKey,
+) {
+  if (!tierAtLeast(tierKey, "silver")) {
+    throw new Error("대출 기간 연장은 실버 등급 이상부터 사용할 수 있습니다.");
+  }
+  return inTransaction(async (client) => {
+    const account = await getAccount(guildId, discordUserId, client, true);
+    await client.query(`UPDATE bank_accounts SET tier_key = $1 WHERE id = $2`, [
+      tierKey,
+      account.id,
+    ]);
+    const loanResult = await client.query<{
+      id: number;
+      account_id: number;
+      due_at: Date | null;
+      extension_count: number;
+      status: string;
+    }>(
+      `SELECT id, account_id, due_at, extension_count, status
+         FROM bank_loans WHERE id = $1 AND guild_id = $2 FOR UPDATE`,
+      [loanId, guildId],
+    );
+    const loan = loanResult.rows[0];
+    if (
+      !loan ||
+      loan.account_id !== account.id ||
+      loan.status !== "approved" ||
+      !loan.due_at
+    ) {
+      throw new Error("연장할 수 있는 본인 대출을 찾을 수 없습니다.");
+    }
+    const settings = await ensureTierSettings(guildId, client);
+    const days = settings.loan_extension_days;
+    const limit = settings.loan_extension_limit;
+    if (days <= 0 || limit <= 0) {
+      throw new Error("관리자가 대출 연장 기간과 횟수를 아직 설정하지 않았습니다.");
+    }
+    if (loan.extension_count >= limit) {
+      throw new Error("이 대출은 설정된 연장 횟수를 모두 사용했습니다.");
+    }
+    const updated = await client.query<{ due_at: Date }>(
+      `UPDATE bank_loans
+          SET due_at = GREATEST(due_at, now()) + ($1::int * INTERVAL '1 day'),
+              extension_count = extension_count + 1
+        WHERE id = $2
+        RETURNING due_at`,
+      [days, loan.id],
+    );
+    await client.query(
+      `INSERT INTO bank_loan_extensions
+         (loan_id, discord_user_id, days, old_due_at, new_due_at)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [loan.id, discordUserId, days, loan.due_at, updated.rows[0].due_at],
+    );
+    return { days, dueAt: updated.rows[0].due_at };
+  });
+}
+
+export async function returnCollateral(
+  guildId: string,
+  actorDiscordUserId: string,
+  loanId: number,
+  reason: string,
+) {
+  return inTransaction(async (client) => {
+    const result = await client.query<{
+      id: number;
+      discord_user_id: string;
+      status: string;
+      loan_type: string;
+      collateral_item: string | null;
+      collateral_quantity: number | null;
+      collateral_status: string;
+    }>(
+      `SELECT l.id, a.discord_user_id, l.status, l.loan_type,
+              l.collateral_item, l.collateral_quantity, l.collateral_status
+         FROM bank_loans l
+         JOIN bank_accounts a ON a.id = l.account_id
+        WHERE l.id = $1 AND l.guild_id = $2
+        FOR UPDATE`,
+      [loanId, guildId],
+    );
+    const loan = result.rows[0];
+    if (
+      !loan ||
+      loan.loan_type !== "collateral" ||
+      loan.status !== "repaid" ||
+      loan.collateral_status !== "return_due"
+    ) {
+      throw new Error("반환 가능한 상환 완료 담보를 찾을 수 없습니다.");
+    }
+    await client.query(
+      `UPDATE bank_loans SET collateral_status = 'returned' WHERE id = $1`,
+      [loan.id],
+    );
+    await client.query(
+      `INSERT INTO bank_vault_history
+         (guild_id, actor_discord_user_id, target_discord_user_id, item_name,
+          quantity, operation, reason)
+       VALUES ($1, $2, $3, $4, $5, 'collateral_return', $6)`,
+      [
+        guildId,
+        actorDiscordUserId,
+        loan.discord_user_id,
+        loan.collateral_item ?? "담보",
+        loan.collateral_quantity ?? 0,
+        reason,
+      ],
+    );
+    return {
+      discordUserId: loan.discord_user_id,
+      itemName: loan.collateral_item,
+      quantity: loan.collateral_quantity,
+    };
+  });
 }
 
 export async function repayLoan(
@@ -723,8 +1396,9 @@ export async function repayLoan(
       currency_id: number;
       amount_due: string;
       status: string;
+      loan_type: string;
     }>(
-      `SELECT id, account_id, currency_id, amount_due, status
+      `SELECT id, account_id, currency_id, amount_due, status, loan_type
          FROM bank_loans WHERE id = $1 AND guild_id = $2 FOR UPDATE`,
       [loanId, guildId],
     );
@@ -749,7 +1423,13 @@ export async function repayLoan(
     );
     const remaining = due - payment;
     await client.query(
-      `UPDATE bank_loans SET amount_due = $1, status = $2 WHERE id = $3`,
+      `UPDATE bank_loans
+          SET amount_due = $1, status = $2,
+              collateral_status = CASE
+                WHEN $2 = 'repaid' AND loan_type = 'collateral' THEN 'return_due'
+                ELSE collateral_status
+              END
+        WHERE id = $3`,
       [remaining, remaining === 0 ? "repaid" : "approved", loan.id],
     );
     await recordTransaction(client, {
@@ -773,26 +1453,47 @@ export async function accrueInterest(guildId: string, runDate: string) {
       [guildId, runDate],
     );
     if (!run.rowCount) return false;
+    await ensureTierSettings(guildId, client);
     await client.query(
       `INSERT INTO bank_transactions
          (guild_id, type, target_account_id, currency_id, amount, description)
        SELECT a.guild_id, 'deposit_interest', a.id, c.id,
-              floor(b.deposit * c.deposit_rate / 100), '일일 예금 이자'
+               floor(b.deposit * (
+                 c.deposit_rate +
+                 CASE WHEN a.tier_key = 'vip'
+                   THEN COALESCE(ts.vip_deposit_rate_bonus, 0) ELSE 0 END
+               ) / 100), '일일 예금 이자'
          FROM bank_balances b
          JOIN bank_accounts a ON a.id = b.account_id
          JOIN bank_currencies c ON c.id = b.currency_id
+         LEFT JOIN bank_tier_settings ts ON ts.guild_id = a.guild_id
         WHERE a.guild_id = $1 AND c.active = true
-          AND b.deposit > 0 AND c.deposit_rate > 0
-          AND floor(b.deposit * c.deposit_rate / 100) > 0`,
+          AND b.deposit > 0
+          AND (c.deposit_rate +
+               CASE WHEN a.tier_key = 'vip'
+                 THEN COALESCE(ts.vip_deposit_rate_bonus, 0) ELSE 0 END) > 0
+          AND floor(b.deposit * (
+                c.deposit_rate +
+                CASE WHEN a.tier_key = 'vip'
+                  THEN COALESCE(ts.vip_deposit_rate_bonus, 0) ELSE 0 END
+              ) / 100) > 0`,
       [guildId],
     );
     await client.query(
       `UPDATE bank_balances b
-          SET deposit = b.deposit + floor(b.deposit * c.deposit_rate / 100)
-         FROM bank_accounts a, bank_currencies c
+          SET deposit = b.deposit + floor(b.deposit * (
+            c.deposit_rate +
+            CASE WHEN a.tier_key = 'vip'
+              THEN COALESCE(ts.vip_deposit_rate_bonus, 0) ELSE 0 END
+          ) / 100)
+         FROM bank_accounts a, bank_currencies c, bank_tier_settings ts
         WHERE b.account_id = a.id AND b.currency_id = c.id
+          AND ts.guild_id = a.guild_id
           AND a.guild_id = $1 AND c.active = true
-          AND b.deposit > 0 AND c.deposit_rate > 0`,
+          AND b.deposit > 0
+          AND (c.deposit_rate +
+               CASE WHEN a.tier_key = 'vip'
+                 THEN COALESCE(ts.vip_deposit_rate_bonus, 0) ELSE 0 END) > 0`,
       [guildId],
     );
     await client.query(

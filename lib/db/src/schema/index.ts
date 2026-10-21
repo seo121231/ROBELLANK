@@ -21,6 +21,8 @@ export const accounts = pgTable(
     guildId: text("guild_id").notNull(),
     discordUserId: text("discord_user_id").notNull(),
     frozen: boolean("frozen").notNull().default(false),
+    tierKey: text("tier_key").notNull().default("bronze"),
+    creditScore: integer("credit_score").notNull().default(0),
     createdAt: createdAt(),
   },
   (table) => [
@@ -131,12 +133,186 @@ export const loans = pgTable(
     amountDue: numeric("amount_due", { precision: 24, scale: 0 }).notNull(),
     rate: numeric("rate", { precision: 8, scale: 4 }).notNull(),
     status: text("status").notNull().default("pending"),
+    loanType: text("loan_type").notNull().default("credit"),
+    requestedTier: text("requested_tier").notNull().default("bronze"),
+    collateralItem: text("collateral_item"),
+    collateralQuantity: integer("collateral_quantity"),
+    collateralValue: numeric("collateral_value", {
+      precision: 24,
+      scale: 0,
+    }),
+    collateralStatus: text("collateral_status").notNull().default("none"),
+    dueAt: timestamp("due_at", { withTimezone: true }),
+    extensionCount: integer("extension_count").notNull().default(0),
     createdAt: createdAt(),
     reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
   },
   (table) => [
     index("bank_loans_account_status_idx").on(table.accountId, table.status),
     index("bank_loans_guild_idx").on(table.guildId),
+  ],
+);
+
+export const tierSettings = pgTable("bank_tier_settings", {
+  guildId: text("guild_id").primaryKey(),
+  platinumLoanBonus: numeric("platinum_loan_bonus", {
+    precision: 24,
+    scale: 0,
+  })
+    .notNull()
+    .default("0"),
+  vipDepositRateBonus: numeric("vip_deposit_rate_bonus", {
+    precision: 8,
+    scale: 4,
+  })
+    .notNull()
+    .default("0"),
+  bronzeStorageLimit: integer("bronze_storage_limit").notNull().default(0),
+  silverStorageLimit: integer("silver_storage_limit").notNull().default(0),
+  goldStorageLimit: integer("gold_storage_limit").notNull().default(0),
+  platinumStorageLimit: integer("platinum_storage_limit").notNull().default(0),
+  aceStorageLimit: integer("ace_storage_limit").notNull().default(0),
+  vipStorageLimit: integer("vip_storage_limit").notNull().default(0),
+  loanTermDays: integer("loan_term_days").notNull().default(0),
+  loanExtensionDays: integer("loan_extension_days").notNull().default(0),
+  loanExtensionLimit: integer("loan_extension_limit").notNull().default(0),
+  updatedAt: createdAt(),
+});
+
+export const creditScoreHistory = pgTable(
+  "bank_credit_score_history",
+  {
+    id: serial("id").primaryKey(),
+    guildId: text("guild_id").notNull(),
+    actorDiscordUserId: text("actor_discord_user_id").notNull(),
+    targetDiscordUserId: text("target_discord_user_id").notNull(),
+    oldScore: integer("old_score").notNull(),
+    newScore: integer("new_score").notNull(),
+    reason: text("reason").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index("bank_credit_score_history_guild_created_idx").on(
+      table.guildId,
+      table.createdAt,
+    ),
+    index("bank_credit_score_history_target_idx").on(
+      table.guildId,
+      table.targetDiscordUserId,
+    ),
+  ],
+);
+
+export const tierSettingHistory = pgTable(
+  "bank_tier_setting_history",
+  {
+    id: serial("id").primaryKey(),
+    guildId: text("guild_id").notNull(),
+    actorDiscordUserId: text("actor_discord_user_id").notNull(),
+    settingKey: text("setting_key").notNull(),
+    oldValue: text("old_value").notNull(),
+    newValue: text("new_value").notNull(),
+    reason: text("reason").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index("bank_tier_setting_history_guild_created_idx").on(
+      table.guildId,
+      table.createdAt,
+    ),
+  ],
+);
+
+export const vaultItems = pgTable(
+  "bank_vault_items",
+  {
+    id: serial("id").primaryKey(),
+    accountId: integer("account_id")
+      .notNull()
+      .references(() => accounts.id),
+    itemKey: text("item_key").notNull(),
+    itemName: text("item_name").notNull(),
+    quantity: integer("quantity").notNull().default(0),
+    updatedAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("bank_vault_items_account_key_uq").on(
+      table.accountId,
+      table.itemKey,
+    ),
+    index("bank_vault_items_account_idx").on(table.accountId),
+  ],
+);
+
+export const vaultHistory = pgTable(
+  "bank_vault_history",
+  {
+    id: serial("id").primaryKey(),
+    guildId: text("guild_id").notNull(),
+    actorDiscordUserId: text("actor_discord_user_id").notNull(),
+    targetDiscordUserId: text("target_discord_user_id").notNull(),
+    itemName: text("item_name").notNull(),
+    quantity: integer("quantity").notNull(),
+    operation: text("operation").notNull(),
+    reason: text("reason").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index("bank_vault_history_guild_created_idx").on(
+      table.guildId,
+      table.createdAt,
+    ),
+    index("bank_vault_history_target_idx").on(
+      table.guildId,
+      table.targetDiscordUserId,
+    ),
+  ],
+);
+
+export const loanExtensions = pgTable(
+  "bank_loan_extensions",
+  {
+    id: serial("id").primaryKey(),
+    loanId: integer("loan_id")
+      .notNull()
+      .references(() => loans.id),
+    discordUserId: text("discord_user_id").notNull(),
+    days: integer("days").notNull(),
+    oldDueAt: timestamp("old_due_at", { withTimezone: true }).notNull(),
+    newDueAt: timestamp("new_due_at", { withTimezone: true }).notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index("bank_loan_extensions_loan_idx").on(table.loanId, table.createdAt),
+  ],
+);
+
+export const bankItemRequests = pgTable(
+  "bank_item_requests",
+  {
+    id: serial("id").primaryKey(),
+    guildId: text("guild_id").notNull(),
+    discordUserId: text("discord_user_id").notNull(),
+    itemName: text("item_name").notNull(),
+    quantity: integer("quantity").notNull(),
+    note: text("note").notNull().default(""),
+    status: text("status").notNull().default("pending"),
+    reviewNote: text("review_note").notNull().default(""),
+    reviewedBy: text("reviewed_by"),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index("bank_item_requests_guild_status_created_idx").on(
+      table.guildId,
+      table.status,
+      table.createdAt,
+    ),
+    index("bank_item_requests_user_idx").on(
+      table.guildId,
+      table.discordUserId,
+      table.createdAt,
+    ),
   ],
 );
 

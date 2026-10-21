@@ -87,14 +87,45 @@ export const commands = [
     .addStringOption((option) => currency(option))
     .addIntegerOption((option) => amount(option)),
   new SlashCommandBuilder()
+    .setName("tier")
+    .setDescription("내 등급, 신용점수, 은행 혜택을 확인합니다"),
+  new SlashCommandBuilder()
     .setName("loan")
     .setDescription("대출 신청·상환·조회 (승인형 대출)")
     .addSubcommand((sub) =>
       sub
         .setName("request")
-        .setDescription("대출을 신청합니다")
+        .setDescription("골드 이상: 신용 대출을 신청합니다 (벨)")
         .addStringOption((option) => currency(option))
         .addIntegerOption((option) => amount(option)),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("collateral-request")
+        .setDescription("실버 이상: 게임에서 확인받을 담보 대출을 신청합니다")
+        .addStringOption((option) =>
+          option
+            .setName("item")
+            .setDescription("맡길 아이템·재료 이름")
+            .setRequired(true)
+            .setMaxLength(80),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("quantity")
+            .setDescription("담보 수량")
+            .setRequired(true)
+            .setMinValue(1)
+            .setMaxValue(2_147_483_647),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("amount")
+            .setDescription("신청할 벨 금액")
+            .setRequired(true)
+            .setMinValue(1)
+            .setMaxValue(2_147_483_647),
+        ),
     )
     .addSubcommand((sub) =>
       sub
@@ -112,8 +143,8 @@ export const commands = [
     .addSubcommand((sub) => sub.setName("list").setDescription("내 대출 목록"))
     .addSubcommand((sub) =>
       sub
-        .setName("approve")
-        .setDescription("대출 신청을 승인합니다 (관리자)")
+        .setName("extend")
+        .setDescription("실버 이상: 대출 기간 연장 (관리자 설정 기준)")
         .addIntegerOption((option) =>
           option
             .setName("loan_id")
@@ -121,6 +152,56 @@ export const commands = [
             .setRequired(true)
             .setMinValue(1),
         ),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("queue")
+        .setDescription("관리자: 등급 우선순위가 적용된 심사 대기 목록"),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("approve")
+        .setDescription("신용 대출 신청을 승인합니다 (관리자)")
+        .addIntegerOption((option) =>
+          option
+            .setName("loan_id")
+            .setDescription("대출 ID")
+            .setRequired(true)
+            .setMinValue(1),
+        ),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("collateral-approve")
+        .setDescription("담보를 게임에서 확인하고 대출을 승인합니다 (관리자)")
+        .addIntegerOption((option) =>
+          option
+            .setName("loan_id")
+            .setDescription("담보 대출 신청 ID")
+            .setRequired(true)
+            .setMinValue(1),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("verified_value")
+            .setDescription("게임에서 확인한 담보 총 가치 (벨)")
+            .setRequired(true)
+            .setMinValue(1)
+            .setMaxValue(2_147_483_647),
+        ),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("collateral-return")
+        .setDescription("상환 완료 담보를 돌려준 뒤 보관 기록을 해제합니다 (관리자)")
+        .addIntegerOption((option) =>
+          option
+            .setName("loan_id")
+            .setDescription("상환 완료한 담보 대출 ID")
+            .setRequired(true)
+            .setMinValue(1),
+        )
+        .addStringOption((option) => adminReason(option)),
     )
     .addSubcommand((sub) =>
       sub
@@ -132,6 +213,225 @@ export const commands = [
             .setDescription("대출 ID")
             .setRequired(true)
             .setMinValue(1),
+        )
+        .addStringOption((option) => adminReason(option)),
+    ),
+  new SlashCommandBuilder()
+    .setName("credit")
+    .setDescription("관리자: 신용점수를 설정합니다")
+    .addSubcommand((sub) =>
+      sub
+        .setName("set")
+        .setDescription("사용자 신용점수 변경 (0~100)")
+        .addUserOption((option) => user(option))
+        .addIntegerOption((option) =>
+          option
+            .setName("score")
+            .setDescription("신용점수")
+            .setRequired(true)
+            .setMinValue(0)
+            .setMaxValue(100),
+        )
+        .addStringOption((option) => adminReason(option)),
+    ),
+  new SlashCommandBuilder()
+    .setName("tier-config")
+    .setDescription("관리자: 등급별 대출·이자·보관 혜택 설정")
+    .addSubcommand((sub) =>
+      sub
+        .setName("limit")
+        .setDescription("플레티넘 이상 신용대출 추가 한도 (벨)")
+        .addIntegerOption((option) =>
+          option
+            .setName("bonus")
+            .setDescription("추가 한도 금액")
+            .setRequired(true)
+            .setMinValue(0)
+            .setMaxValue(2_147_483_647),
+        ),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("interest")
+        .setDescription("VIP 예금 추가 일일 이자율 (%p)")
+        .addNumberOption((option) =>
+          option
+            .setName("rate")
+            .setDescription("기본 예금이자율에 더할 일일 %p")
+            .setRequired(true)
+            .setMinValue(0)
+            .setMaxValue(100),
+        ),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("storage")
+        .setDescription("등급별 아이템 보관 한도 설정 (개수)")
+        .addStringOption((option) =>
+          option
+            .setName("tier")
+            .setDescription("대상 등급")
+            .setRequired(true)
+            .addChoices(
+              { name: "브론즈", value: "bronze" },
+              { name: "실버", value: "silver" },
+              { name: "골드", value: "gold" },
+              { name: "플레티넘", value: "platinum" },
+              { name: "에이스", value: "ace" },
+              { name: "VIP", value: "vip" },
+            ),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("capacity")
+            .setDescription("보관 가능한 총 아이템 개수")
+            .setRequired(true)
+            .setMinValue(0)
+            .setMaxValue(2_147_483_647),
+        ),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("loan-term")
+        .setDescription("신규 대출 기본 기간을 설정합니다 (일, 0=기간 없음)")
+        .addIntegerOption((option) =>
+          option
+            .setName("days")
+            .setDescription("기본 대출 기간")
+            .setRequired(true)
+            .setMinValue(0)
+            .setMaxValue(3650),
+        ),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("extension")
+        .setDescription("1회 연장 기간과 대출별 최대 연장 횟수를 설정합니다")
+        .addIntegerOption((option) =>
+          option
+            .setName("days")
+            .setDescription("1회 연장 일수 (0=연장 비활성화)")
+            .setRequired(true)
+            .setMinValue(0)
+            .setMaxValue(3650),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("limit")
+            .setDescription("대출별 최대 연장 횟수")
+            .setRequired(true)
+            .setMinValue(0)
+            .setMaxValue(10),
+        ),
+    ),
+  new SlashCommandBuilder()
+    .setName("vault")
+    .setDescription("은행에 맡긴 아이템을 확인하거나 관리자 인증 후 기록합니다")
+    .addSubcommand((sub) =>
+      sub.setName("list").setDescription("내 은행 보관 아이템 확인"),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("add")
+        .setDescription("관리자: 게임에서 확인한 아이템을 은행에 보관")
+        .addUserOption((option) => user(option))
+        .addStringOption((option) =>
+          option
+            .setName("item")
+            .setDescription("아이템·재료 이름")
+            .setRequired(true)
+            .setMaxLength(80),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("quantity")
+            .setDescription("확인된 수량")
+            .setRequired(true)
+            .setMinValue(1)
+            .setMaxValue(2_147_483_647),
+        )
+        .addStringOption((option) => adminReason(option)),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("remove")
+        .setDescription("관리자: 게임에서 반환한 아이템을 보관 기록에서 제거")
+        .addUserOption((option) => user(option))
+        .addStringOption((option) =>
+          option
+            .setName("item")
+            .setDescription("아이템·재료 이름")
+            .setRequired(true)
+            .setMaxLength(80),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("quantity")
+            .setDescription("반환한 수량")
+            .setRequired(true)
+            .setMinValue(1)
+            .setMaxValue(2_147_483_647),
+        )
+        .addStringOption((option) => adminReason(option)),
+    ),
+  new SlashCommandBuilder()
+    .setName("bank-request")
+    .setDescription("플레티넘 이상 은행 의뢰·관리자 처리")
+    .addSubcommand((sub) =>
+      sub
+        .setName("submit")
+        .setDescription("아이템·재료를 은행에 찾아달라고 요청합니다")
+        .addStringOption((option) =>
+          option
+            .setName("item")
+            .setDescription("찾아달라는 아이템·재료")
+            .setRequired(true)
+            .setMaxLength(80),
+        )
+        .addIntegerOption((option) =>
+          option
+            .setName("quantity")
+            .setDescription("필요한 수량")
+            .setRequired(true)
+            .setMinValue(1)
+            .setMaxValue(2_147_483_647),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("note")
+            .setDescription("추가 설명 (선택)")
+            .setMaxLength(300),
+        ),
+    )
+    .addSubcommand((sub) =>
+      sub.setName("list").setDescription("내 은행 의뢰 현황"),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("queue")
+        .setDescription("관리자: 진행 중인 은행 의뢰 목록"),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("update")
+        .setDescription("관리자: 의뢰를 수락·거절·완료 처리합니다")
+        .addIntegerOption((option) =>
+          option
+            .setName("request_id")
+            .setDescription("의뢰 ID")
+            .setRequired(true)
+            .setMinValue(1),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("status")
+            .setDescription("변경할 상태")
+            .setRequired(true)
+            .addChoices(
+              { name: "수락", value: "accepted" },
+              { name: "거절", value: "declined" },
+              { name: "구매·전달 완료", value: "fulfilled" },
+            ),
         )
         .addStringOption((option) => adminReason(option)),
     ),
@@ -302,7 +602,7 @@ export const commands = [
     ),
   new SlashCommandBuilder()
     .setName("mint")
-    .setDescription("관리자: 재화를 발행해 지급합니다 (확인 버튼 필요)")
+    .setDescription("관리자: 게임 내 인증을 마친 재화를 지급합니다 (확인 필요)")
     .addUserOption((option) => user(option))
     .addStringOption((option) => currency(option))
     .addIntegerOption((option) => amount(option))

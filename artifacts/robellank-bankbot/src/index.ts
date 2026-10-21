@@ -13,11 +13,14 @@ import {
   Routes,
   type ButtonInteraction,
   type ChatInputCommandInteraction,
+  type GuildMemberRoleManager,
   type TextChannel,
 } from "discord.js";
 import pino from "pino";
 import { commands } from "./commands";
 import * as store from "./store";
+import { getTier, resolveTier, tierAtLeast } from "./tiers";
+import type { TierKey } from "./tiers";
 
 const logger = pino({ level: process.env.LOG_LEVEL ?? "info" });
 const token = process.env.DISCORD_BOT_TOKEN;
@@ -32,7 +35,28 @@ type PendingAction =
       amount: number;
       reason: string;
     }
-  | { kind: "loan"; loanId: number; approve: boolean; reason?: string }
+  | {
+      kind: "loan";
+      loanId: number;
+      approve: boolean;
+      reason?: string;
+      verifiedCollateralValue?: number;
+    }
+  | { kind: "collateral-return"; loanId: number; reason: string }
+  | {
+      kind: "vault";
+      operation: "add" | "remove";
+      targetId: string;
+      itemName: string;
+      quantity: number;
+      reason: string;
+    }
+  | {
+      kind: "bank-request";
+      requestId: number;
+      status: "accepted" | "declined" | "fulfilled";
+      reason: string;
+    }
   | { kind: "currency-remove"; currency: string; reason: string }
   | {
       kind: "shares";
@@ -58,11 +82,29 @@ const format = (value: string | number) =>
   );
 
 const mention = (id: string) => `<@${id}>`;
+const tierRequirements: Record<TierKey, string> = {
+  bronze: "기본 등급",
+  silver: "캐릭터 50레벨 이상 · 리더보드 25레벨 이상 · 신용점수 40점 이상",
+  gold: "캐릭터 75레벨 이상 · 리더보드 50레벨 이상 · 계좌·재화 인증 완료 · 신용점수 50점 이상",
+  platinum: "캐릭터 150레벨 이상 · 25만 벨 이상 저축 · 리더보드 85레벨 이상 · 다수의 은행 이용 · 신용점수 60점 이상",
+  ace: "캐릭터 200레벨 이상 · 리더보드 120레벨 이상 · 신용점수 70점 이상",
+  vip: "캐릭터 250레벨 이상 · 리더보드 150레벨 이상 · 신용점수 80점 이상",
+};
 const privateContent = (content: string) =>
   content.length <= 1900 ? content : `${content.slice(0, 1880)}\n…내용이 길어 일부를 생략했습니다.`;
 const guildIdFrom = (interaction: ChatInputCommandInteraction) => {
   if (!interaction.guildId) throw new Error("서버 안에서만 사용할 수 있습니다.");
   return interaction.guildId;
+};
+const tierFromInteraction = (interaction: ChatInputCommandInteraction) => {
+  const roles = interaction.member?.roles;
+  if (Array.isArray(roles)) return resolveTier(roles);
+  if (roles && typeof roles === "object" && "cache" in roles) {
+    return resolveTier(
+      [...(roles as GuildMemberRoleManager).cache.keys()],
+    );
+  }
+  return resolveTier([]);
 };
 const requireAdmin = (interaction: ChatInputCommandInteraction) => {
   if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
@@ -215,8 +257,37 @@ async function handleConfirmation(interaction: ButtonInteraction) {
         action.loanId,
         action.approve,
         action.reason,
+        action.verifiedCollateralValue,
       );
       result = `대출 #${review.loanId} ${review.approved ? "승인" : "거절"}을 완료했습니다.`;
+    } else if (action.kind === "collateral-return") {
+      const returned = await store.returnCollateral(
+        guildId,
+        interaction.user.id,
+        action.loanId,
+        action.reason,
+      );
+      result = `대출 #${action.loanId} 담보 반환을 기록했습니다: ${returned.itemName} ${format(returned.quantity ?? 0)}개 · ${mention(returned.discordUserId)}.`;
+    } else if (action.kind === "vault") {
+      await store.adjustVault(
+        guildId,
+        interaction.user.id,
+        action.targetId,
+        action.itemName,
+        action.quantity,
+        action.operation,
+        action.reason,
+      );
+      result = `${mention(action.targetId)} 은행 보관 아이템 ${action.operation === "add" ? "입고" : "반환"} 기록 완료: ${action.itemName} ${format(action.quantity)}개 · 사유: ${action.reason}`;
+    } else if (action.kind === "bank-request") {
+      const request = await store.updateBankItemRequest(
+        guildId,
+        interaction.user.id,
+        action.requestId,
+        action.status,
+        action.reason,
+      );
+      result = `은행 의뢰 #${request.id} 상태를 ${action.status}로 변경했습니다. ${mention(request.discord_user_id)} · ${request.item_name} ${format(request.quantity)}개 · 사유: ${action.reason}`;
     } else if (action.kind === "currency-remove") {
       const currencyRow = await store.removeCurrency(guildId, action.currency);
       result = `${currencyRow.name} 재화를 비활성화했습니다. 기록은 보존됩니다. 사유: ${action.reason}`;
@@ -255,12 +326,15 @@ function helpEmbed() {
         "**기본·송금**",
         "`/register` 계좌 개설 · `/balance [user]` 잔액 · `/transfer user currency amount` 송금",
         "`/exchange from to amount` 환전 · `/history` 내역 · `/leaderboard currency` 순위",
-        "`/currency list` 재화·환율·일일 이자율",
+        "`/currency list` 재화·환율·일일 이자율 · `/tier` 등급과 혜택 · `/vault list` 보관 아이템",
         "",
         "**예금·대출**",
         "`/deposit currency amount` 예금 · `/withdraw currency amount` 출금",
-        "`/loan request currency amount` 신청 · `/loan repay loan_id amount` 상환 · `/loan list` 조회",
-        "대출 신청은 관리자 승인 후 지급됩니다. 예금·대출 이자는 매일 한국 시간 자정에 계산됩니다.",
+        "`/loan request currency amount` 신용 대출 · `/loan collateral-request item quantity amount` 담보 대출",
+        "`/loan repay loan_id amount` 상환 · `/loan extend loan_id` 연장 · `/loan list` 조회",
+        "골드부터 신용 대출(신용점수 1점당 10,000벨), 실버부터 담보 대출과 연장이 가능합니다. 관리자 승인 후 지급되며, 담보는 게임에서 확인합니다.",
+        "VIP는 관리자가 설정한 추가 예금 이자를 받습니다. 등급 역할은 서버 관리자가 직접 부여하며 봇은 역할을 변경하지 않습니다.",
+        "예금·대출 이자는 매일 한국 시간 자정에 계산됩니다.",
         "",
         "**길드 가상주식**",
         "`/stock list` 종목 · `/stock quote ticker` 시세 · `/stock buy ticker shares limit_price` 매수 주문",
@@ -272,8 +346,10 @@ function helpEmbed() {
         "",
         "**관리자**",
         "`/currency create|setbase|setvalue|setrate|remove` 재화 관리",
-        "`/mint`, `/confiscate` 지급·몰수 (확인 버튼 필요) · `/freeze`, `/unfreeze`, `/supply`",
-        "`/loan approve|reject` 대출 심사",
+        "`/mint` 게임 내 확인을 마친 재화 지급 · `/confiscate` 회수 (확인 버튼 필요)",
+        "`/credit set` 신용점수 · `/tier-config` 한도·이자·보관·대출기간 설정",
+        "`/vault add|remove` 게임에서 확인한 보관 아이템 기록 · `/freeze`, `/unfreeze`, `/supply`",
+        "`/loan queue|approve|collateral-approve|collateral-return|reject` 대출 심사",
         "`/market create|remove|issue|burn|evaluate|publish|channel|note|officer-add|officer-remove`",
       ].join("\n"),
     )
@@ -282,19 +358,36 @@ function helpEmbed() {
     });
 }
 
-async function handleLoan(interaction: ChatInputCommandInteraction) {
+async function handleLoan(
+  interaction: ChatInputCommandInteraction,
+  tierKey: TierKey,
+) {
   const guildId = guildIdFrom(interaction);
   const subcommand = interaction.options.getSubcommand();
   if (subcommand === "request") {
-    const request = await store.createLoanRequest(
+    const request = await store.createCreditLoanRequest(
       guildId,
       interaction.user.id,
       interaction.options.getString("currency", true),
       interaction.options.getInteger("amount", true),
+      tierKey,
     );
     await replyPrivate(
       interaction,
-      `대출 신청 #${request.loanId}을 접수했습니다. 관리자의 승인을 기다려 주세요.`,
+      `신용 대출 신청 #${request.loanId}을 접수했습니다. 총 한도 ${format(request.creditLimit)}벨, 승인 대기 포함 남은 한도 ${format(request.available)}벨입니다. 관리자 승인을 기다려 주세요.`,
+    );
+  } else if (subcommand === "collateral-request") {
+    const request = await store.createCollateralLoanRequest(
+      guildId,
+      interaction.user.id,
+      interaction.options.getString("item", true),
+      interaction.options.getInteger("quantity", true),
+      interaction.options.getInteger("amount", true),
+      tierKey,
+    );
+    await replyPrivate(
+      interaction,
+      `담보 대출 신청 #${request.loanId}을 접수했습니다. 관리자가 게임에서 아이템과 로벨 상단 가치표 기준 가치를 확인한 뒤 승인합니다.`,
     );
   } else if (subcommand === "repay") {
     const result = await store.repayLoan(
@@ -312,25 +405,328 @@ async function handleLoan(interaction: ChatInputCommandInteraction) {
     const description = rows.length
       ? rows
           .map(
-            (loan) =>
-              `#${loan.id} ${loan.currency} · 원금 ${format(loan.principal)} · 남은 원리금 ${format(loan.amount_due)} · 일 ${loan.rate}% · ${loan.status}`,
+            (loan: {
+              id: number;
+              currency: string;
+              principal: string;
+              amount_due: string;
+              rate: string;
+              status: string;
+              loan_type: string;
+              collateral_item: string | null;
+              collateral_quantity: number | null;
+              collateral_value: string | null;
+              collateral_status: string;
+              due_at: Date | null;
+              extension_count: number;
+            }) => {
+              const type = loan.loan_type === "collateral" ? "담보" : "신용";
+              const collateral =
+                loan.loan_type === "collateral"
+                  ? ` · ${loan.collateral_item} ${format(loan.collateral_quantity ?? 0)}개 · 확인 가치 ${format(loan.collateral_value ?? 0)}벨 · 담보 ${loan.collateral_status}`
+                  : "";
+              const due = loan.due_at
+                ? ` · 만기 <t:${Math.floor(new Date(loan.due_at).getTime() / 1000)}:d> · 연장 ${loan.extension_count}회`
+                : "";
+              return `#${loan.id} ${type} · 원금 ${format(loan.principal)} · 남은 원리금 ${format(loan.amount_due)} · 일 ${loan.rate}% · ${loan.status}${due}${collateral}`;
+            },
           )
           .join("\n")
       : "대출 내역이 없습니다.";
     await replyPrivate(interaction, description);
-  } else if (subcommand === "approve" || subcommand === "reject") {
+  } else if (subcommand === "extend") {
+    const result = await store.extendLoan(
+      guildId,
+      interaction.user.id,
+      interaction.options.getInteger("loan_id", true),
+      tierKey,
+    );
+    await replyPrivate(
+      interaction,
+      `대출 기간을 ${result.days}일 연장했습니다. 새 만기: <t:${Math.floor(new Date(result.dueAt).getTime() / 1000)}:d>.`,
+    );
+  } else if (subcommand === "queue") {
+    requireAdmin(interaction);
+    const rows = await store.listLoanQueue(guildId);
+    await replyPrivate(
+      interaction,
+      rows.length
+        ? rows
+            .map(
+              (loan: {
+                id: number;
+                discord_user_id: string;
+                loan_type: string;
+                requested_tier: string;
+                principal: string;
+                collateral_item: string | null;
+                collateral_quantity: number | null;
+                created_at: Date;
+              }) =>
+                `#${loan.id} ${mention(loan.discord_user_id)} · ${getTier(loan.requested_tier).name} · ${loan.loan_type === "collateral" ? `담보 ${loan.collateral_item} ${format(loan.collateral_quantity ?? 0)}개` : "신용"} · ${format(loan.principal)}벨${tierAtLeast(loan.requested_tier, "ace") ? " · 우선 심사" : ""}`,
+            )
+            .join("\n")
+        : "심사 대기 중인 대출이 없습니다.",
+    );
+  } else if (
+    subcommand === "approve" ||
+    subcommand === "collateral-approve" ||
+    subcommand === "collateral-return" ||
+    subcommand === "reject"
+  ) {
     requireAdmin(interaction);
     const loanId = interaction.options.getInteger("loan_id", true);
     const reason = interaction.options.getString("reason") ?? "";
+    if (subcommand === "collateral-return") {
+      await queueConfirmation(
+        interaction,
+        { kind: "collateral-return", loanId, reason },
+        `대출 #${loanId} 담보를 게임에서 반환한 것으로 기록합니다. 사유: ${reason}`,
+      );
+      return;
+    }
     await queueConfirmation(
       interaction,
       {
         kind: "loan",
         loanId,
-        approve: subcommand === "approve",
+        approve: subcommand === "approve" || subcommand === "collateral-approve",
         reason,
+        verifiedCollateralValue:
+          subcommand === "collateral-approve"
+            ? interaction.options.getInteger("verified_value", true)
+            : undefined,
       },
-      `대출 #${loanId} 신청을 ${subcommand === "approve" ? "승인" : `거절합니다. 사유: ${reason}`}?`,
+      subcommand === "collateral-approve"
+        ? `대출 #${loanId} 담보를 게임에서 확인했습니다. 담보 총 가치 ${format(interaction.options.getInteger("verified_value", true))}벨로 승인합니다.`
+        : `대출 #${loanId} 신청을 ${subcommand === "approve" ? "승인" : `거절합니다. 사유: ${reason}`}?`,
+    );
+  }
+}
+
+async function handleTier(interaction: ChatInputCommandInteraction, tierKey: TierKey) {
+  const guildId = guildIdFrom(interaction);
+  const profile = await store.getTierSummary(
+    guildId,
+    interaction.user.id,
+    tierKey,
+  );
+  const settings = profile.settings;
+  const platinumBonus = Number(settings.platinum_loan_bonus);
+  const vipRate = Number(settings.vip_deposit_rate_bonus);
+  const capacityKey = `${tierKey}_storage_limit` as keyof typeof settings;
+  const storageCapacity = Number(settings[capacityKey]);
+  const benefits = [
+    "계좌 입금·출금",
+    tierAtLeast(tierKey, "silver") ? "게임 확인형 아이템 담보 대출" : "대출 불가",
+    tierAtLeast(tierKey, "gold")
+      ? `신용 대출 최대 ${format(profile.creditLimit)}벨 (신용점수 × 10,000${tierAtLeast(tierKey, "platinum") ? ` + ${format(platinumBonus)}` : ""})`
+      : "신용 대출 불가",
+    tierAtLeast(tierKey, "silver") ? "관리자 설정 시 대출 기간 연장" : "",
+    tierAtLeast(tierKey, "platinum")
+      ? `은행 아이템 보관 한도 ${storageCapacity > 0 ? `${format(storageCapacity)}개` : "미설정"}`
+      : "",
+    tierAtLeast(tierKey, "ace") ? "신용 대출 우선 심사" : "",
+    tierKey === "vip"
+      ? `예금 일일 이자 +${vipRate}%p`
+      : "",
+    tierAtLeast(tierKey, "platinum") ? "은행 의뢰·이벤트 우대는 관리자 수동 운영" : "",
+  ].filter(Boolean);
+  const dueSettings =
+    settings.loan_term_days > 0
+      ? `기본 ${settings.loan_term_days}일 · 연장 ${settings.loan_extension_days}일 × 최대 ${settings.loan_extension_limit}회`
+      : "대출 만기 미설정";
+  await replyPrivate(
+    interaction,
+    [
+      `현재 등급: **${profile.tier.name}** (서버 관리자가 부여한 역할 기준)`,
+      `등급 기준 안내: ${tierRequirements[tierKey]} (게임 레벨·활동은 봇이 자동 확인하지 않습니다.)`,
+      `신용점수: **${profile.creditScore}점** · 신용 한도 사용: ${format(profile.creditUsed)} / ${format(profile.creditLimit)}벨`,
+      `대출 기간: ${dueSettings}`,
+      "",
+      "**적용 혜택**",
+      ...benefits.map((benefit) => `• ${benefit}`),
+      "",
+      "등급 역할은 봇이 부여하거나 변경하지 않습니다. 조건 확인과 역할 부여는 서버 관리자가 합니다.",
+    ].join("\n"),
+  );
+}
+
+async function handleTierConfig(interaction: ChatInputCommandInteraction) {
+  requireAdmin(interaction);
+  const guildId = guildIdFrom(interaction);
+  const subcommand = interaction.options.getSubcommand();
+  const reason = interaction.options.getString("reason") ?? "관리자 등급 설정";
+  if (subcommand === "limit") {
+    const value = interaction.options.getInteger("bonus", true);
+    await store.setTierSetting(
+      guildId,
+      interaction.user.id,
+      "platinum_loan_bonus",
+      value,
+      reason,
+    );
+    await replyPrivate(interaction, `플레티넘 이상 신용대출 추가 한도를 ${format(value)}벨로 설정했습니다.`);
+  } else if (subcommand === "interest") {
+    const value = interaction.options.getNumber("rate", true);
+    await store.setTierSetting(
+      guildId,
+      interaction.user.id,
+      "vip_deposit_rate_bonus",
+      value,
+      reason,
+    );
+    await replyPrivate(interaction, `VIP 예금 일일 추가 이자율을 ${value}%p로 설정했습니다.`);
+  } else if (subcommand === "storage") {
+    const tierKey = interaction.options.getString("tier", true) as TierKey;
+    const value = interaction.options.getInteger("capacity", true);
+    await store.setTierSetting(
+      guildId,
+      interaction.user.id,
+      `${tierKey}_storage_limit` as store.TierSettingKey,
+      value,
+      reason,
+    );
+    await replyPrivate(interaction, `${getTier(tierKey).name} 아이템 보관 한도를 ${format(value)}개로 설정했습니다.`);
+  } else if (subcommand === "loan-term") {
+    const value = interaction.options.getInteger("days", true);
+    await store.setTierSetting(
+      guildId,
+      interaction.user.id,
+      "loan_term_days",
+      value,
+      reason,
+    );
+    await replyPrivate(interaction, `신규 대출 기본 기간을 ${value === 0 ? "만기 없음" : `${value}일`}로 설정했습니다.`);
+  } else if (subcommand === "extension") {
+    const days = interaction.options.getInteger("days", true);
+    const limit = interaction.options.getInteger("limit", true);
+    await store.setTierSetting(
+      guildId,
+      interaction.user.id,
+      "loan_extension_days",
+      days,
+      reason,
+    );
+    await store.setTierSetting(
+      guildId,
+      interaction.user.id,
+      "loan_extension_limit",
+      limit,
+      reason,
+    );
+    await replyPrivate(interaction, `대출 연장 기준을 ${days}일씩 최대 ${limit}회로 설정했습니다.`);
+  }
+}
+
+async function handleVault(interaction: ChatInputCommandInteraction) {
+  const guildId = guildIdFrom(interaction);
+  const subcommand = interaction.options.getSubcommand();
+  if (subcommand === "list") {
+    const result = await store.listVaultItems(guildId, interaction.user.id);
+    const list = result.items.length
+      ? result.items.map((item) => `${item.item_name}: ${format(item.quantity)}개`).join("\n")
+      : "보관 중인 아이템이 없습니다.";
+    await replyPrivate(
+      interaction,
+      `**${result.tier.name} 은행 보관함** · ${format(result.items.reduce((sum, item) => sum + Number(item.quantity), 0))}/${result.capacity}개\n${list}`,
+    );
+    return;
+  }
+  requireAdmin(interaction);
+  const target = interaction.options.getUser("user", true);
+  const itemName = interaction.options.getString("item", true);
+  const quantity = interaction.options.getInteger("quantity", true);
+  const reason = interaction.options.getString("reason", true);
+  const operation = subcommand === "add" ? "add" : "remove";
+  await queueConfirmation(
+    interaction,
+    {
+      kind: "vault",
+      operation,
+      targetId: target.id,
+      itemName,
+      quantity,
+      reason,
+    },
+    `${mention(target.id)} ${itemName} ${format(quantity)}개를 은행 보관함에서 ${operation === "add" ? "입고" : "반환"} 처리합니다. 게임에서 확인했는지 검토하세요. 사유: ${reason}`,
+  );
+}
+
+async function handleBankRequest(
+  interaction: ChatInputCommandInteraction,
+  tierKey: TierKey,
+) {
+  const guildId = guildIdFrom(interaction);
+  const subcommand = interaction.options.getSubcommand();
+  if (subcommand === "submit") {
+    const result = await store.createBankItemRequest(
+      guildId,
+      interaction.user.id,
+      interaction.options.getString("item", true),
+      interaction.options.getInteger("quantity", true),
+      interaction.options.getString("note") ?? "",
+      tierKey,
+    );
+    await replyPrivate(
+      interaction,
+      `은행 의뢰 #${result.requestId}을 접수했습니다. 운영진이 아이템을 확인해 수락·구매한 뒤 완료 처리합니다.`,
+    );
+  } else if (subcommand === "list") {
+    const requests = await store.listBankItemRequests(
+      guildId,
+      interaction.user.id,
+    );
+    await replyPrivate(
+      interaction,
+      requests.length
+        ? requests
+            .map(
+              (request: {
+                id: number;
+                item_name: string;
+                quantity: number;
+                status: string;
+                review_note: string;
+              }) =>
+                `#${request.id} ${request.item_name} ${format(request.quantity)}개 · ${request.status}${request.review_note ? ` · ${request.review_note}` : ""}`,
+            )
+            .join("\n")
+        : "은행 의뢰 내역이 없습니다.",
+    );
+  } else if (subcommand === "queue") {
+    requireAdmin(interaction);
+    const requests = await store.listBankItemRequests(guildId);
+    await replyPrivate(
+      interaction,
+      requests.length
+        ? requests
+            .map(
+              (request: {
+                id: number;
+                discord_user_id: string;
+                item_name: string;
+                quantity: number;
+                note: string;
+                status: string;
+              }) =>
+                `#${request.id} ${mention(request.discord_user_id)} · ${request.item_name} ${format(request.quantity)}개 · ${request.status}${request.note ? ` · ${request.note}` : ""}`,
+            )
+            .join("\n")
+        : "진행 중인 은행 의뢰가 없습니다.",
+    );
+  } else if (subcommand === "update") {
+    requireAdmin(interaction);
+    const requestId = interaction.options.getInteger("request_id", true);
+    const status = interaction.options.getString("status", true) as
+      | "accepted"
+      | "declined"
+      | "fulfilled";
+    const reason = interaction.options.getString("reason", true);
+    await queueConfirmation(
+      interaction,
+      { kind: "bank-request", requestId, status, reason },
+      `은행 의뢰 #${requestId} 상태를 ${status}로 변경합니다. 사유: ${reason}`,
     );
   }
 }
@@ -623,12 +1019,19 @@ async function handleMarket(interaction: ChatInputCommandInteraction) {
 
 async function handleCommand(interaction: ChatInputCommandInteraction) {
   const guildId = guildIdFrom(interaction);
+  const memberTier = tierFromInteraction(interaction);
+  await store.syncTierSnapshot(
+    guildId,
+    interaction.user.id,
+    memberTier.key,
+  );
   switch (interaction.commandName) {
     case "register": {
       const result = await store.registerAccount(guildId, interaction.user.id);
+      await store.syncTierSnapshot(guildId, interaction.user.id, memberTier.key);
       await replyPrivate(
         interaction,
-        `계좌가 준비되었습니다. 기본재화는 ${result.currency.name}입니다. 지갑 잔액은 0이며, 서버 관리자에게 문의해 재화를 받을 수 있습니다.`,
+        `계좌가 준비되었습니다. 기본재화는 ${result.currency.name}입니다. 지갑 잔액은 0입니다. 게임 내 재화를 관리자에게 인증한 뒤 관리자가 /mint로 지급합니다.`,
       );
       break;
     }
@@ -637,6 +1040,9 @@ async function handleCommand(interaction: ChatInputCommandInteraction) {
         embeds: [helpEmbed()],
         flags: MessageFlags.Ephemeral,
       });
+      break;
+    case "tier":
+      await handleTier(interaction, memberTier.key);
       break;
     case "balance": {
       const user = interaction.options.getUser("user") ?? interaction.user;
@@ -731,7 +1137,34 @@ async function handleCommand(interaction: ChatInputCommandInteraction) {
       break;
     }
     case "loan":
-      await handleLoan(interaction);
+      await handleLoan(interaction, memberTier.key);
+      break;
+    case "credit": {
+      requireAdmin(interaction);
+      const target = interaction.options.getUser("user", true);
+      const score = interaction.options.getInteger("score", true);
+      const reason = interaction.options.getString("reason", true);
+      const change = await store.setCreditScore(
+        guildId,
+        interaction.user.id,
+        target.id,
+        score,
+        reason,
+      );
+      await replyPrivate(
+        interaction,
+        `${mention(target.id)} 신용점수를 ${change.oldScore}점에서 ${change.score}점으로 변경했습니다. 사유: ${reason}`,
+      );
+      break;
+    }
+    case "tier-config":
+      await handleTierConfig(interaction);
+      break;
+    case "vault":
+      await handleVault(interaction);
+      break;
+    case "bank-request":
+      await handleBankRequest(interaction, memberTier.key);
       break;
     case "stock":
       await handleStock(interaction);
