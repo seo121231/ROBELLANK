@@ -1,0 +1,1 @@
+- [Drizzle push rename prompts](drizzle-push-rename-prompts.md) — same-type column replacement can still trigger a TTY prompt despite `--force`; stage schema additions and removals separately.

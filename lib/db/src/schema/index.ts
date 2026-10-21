@@ -10,6 +10,7 @@ import {
   timestamp,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 const createdAt = () =>
   timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
@@ -322,14 +323,17 @@ export const stocks = pgTable(
     id: serial("id").primaryKey(),
     guildId: text("guild_id").notNull(),
     name: text("name").notNull(),
-    ticker: text("ticker").notNull(),
+    description: text("description").notNull().default(""),
     currentPrice: integer("current_price").notNull(),
     totalShares: integer("total_shares").notNull().default(0),
     listed: boolean("listed").notNull().default(true),
     createdAt: createdAt(),
   },
   (table) => [
-    uniqueIndex("bank_stocks_guild_ticker_uq").on(table.guildId, table.ticker),
+    uniqueIndex("bank_stocks_guild_name_uq").on(
+      table.guildId,
+      sql`lower(trim(${table.name}))`,
+    ),
     index("bank_stocks_guild_listed_idx").on(table.guildId, table.listed),
   ],
 );

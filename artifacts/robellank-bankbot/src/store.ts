@@ -813,7 +813,7 @@ export async function recentHistory(guildId: string, discordUserId: string) {
   const result = await pool.query(
     `SELECT t.type, t.amount, t.fee, t.description, t.created_at,
             c.name AS currency, t.target_account_id, t.actor_account_id,
-            s.ticker, tr.shares, tr.execution_price
+            s.name AS stock_name, tr.shares, tr.execution_price
        FROM bank_transactions t
        JOIN bank_currencies c ON c.id = t.currency_id
        LEFT JOIN bank_stock_trades tr
@@ -1563,69 +1563,130 @@ export async function accrueInterest(guildId: string, runDate: string) {
   });
 }
 
-async function findStock(guildId: string, stockTicker: string, queryable: Queryable = pool, lock = false) {
+async function findStock(guildId: string, stockName: string, queryable: Queryable = pool, lock = false) {
   const result = await queryable.query<{
     id: number;
     name: string;
-    ticker: string;
+    description: string;
     current_price: number;
     total_shares: number;
+    market_cap: string;
     listed: boolean;
   }>(
-    `SELECT id, name, ticker, current_price, total_shares, listed
+    `SELECT id, name, description, current_price, total_shares,
+            current_price::numeric * total_shares AS market_cap, listed
        FROM bank_stocks
-      WHERE guild_id = $1 AND lower(ticker) = lower($2)
+      WHERE guild_id = $1 AND lower(trim(name)) = lower(trim($2))
       LIMIT 1${lock ? " FOR UPDATE" : ""}`,
-    [guildId, stockTicker],
+    [guildId, stockName],
   );
   const stock = result.rows[0];
-  if (!stock) throw new Error(`종목 '${stockTicker}'을(를) 찾을 수 없습니다.`);
+  if (!stock) throw new Error(`종목 이름 '${stockName}'을(를) 찾을 수 없습니다.`);
   if (!stock.listed) throw new Error("상장 폐지된 종목입니다.");
   return stock;
 }
 
 export async function listStocks(guildId: string) {
-  const result = await pool.query(
-    `SELECT name, ticker, current_price, total_shares
-       FROM bank_stocks WHERE guild_id = $1 AND listed = true
-      ORDER BY ticker`,
+  const result = await pool.query<{
+    name: string;
+    description: string;
+    current_price: number;
+    total_shares: number;
+    market_cap: string;
+    change_percent: number | null;
+  }>(
+    `SELECT s.name, s.description, s.current_price, s.total_shares,
+            s.current_price::bigint * s.total_shares AS market_cap,
+            e.change_percent
+       FROM bank_stocks s
+       LEFT JOIN LATERAL (
+         SELECT change_percent
+           FROM bank_stock_evaluations
+          WHERE stock_id = s.id AND status = 'published'
+          ORDER BY evaluation_date DESC LIMIT 1
+       ) e ON true
+      WHERE s.guild_id = $1 AND s.listed = true
+      ORDER BY lower(s.name), s.name`,
     [guildId],
   );
   return result.rows;
 }
 
-export async function quoteStock(guildId: string, stockTicker: string) {
-  const stock = await findStock(guildId, stockTicker);
+export async function quoteStock(guildId: string, stockName: string) {
+  const stock = await findStock(guildId, stockName);
   const result = await pool.query(
-    `SELECT evaluation_date, final_score, change_percent, old_price, new_price, evidence
+    `SELECT evaluation_date, content_score, activity_score, membership_score,
+            events_score, growth_score, influence_score, opinion_score,
+            base_score, random_score, final_score, change_percent,
+            old_price, new_price, evidence
        FROM bank_stock_evaluations
       WHERE stock_id = $1 AND status = 'published'
       ORDER BY evaluation_date DESC LIMIT 1`,
     [stock.id],
   );
-  return { ...stock, evaluation: result.rows[0] };
+  const orderBook = await pool.query(
+    `SELECT
+       (SELECT limit_price FROM bank_stock_orders
+         WHERE stock_id = $1 AND side = 'buy' AND status IN ('open', 'partial')
+         ORDER BY limit_price DESC, created_at ASC, id ASC LIMIT 1) AS best_bid,
+       (SELECT COALESCE(SUM(remaining), 0) FROM bank_stock_orders
+         WHERE stock_id = $1 AND side = 'buy' AND status IN ('open', 'partial')) AS bid_shares,
+       (SELECT limit_price FROM bank_stock_orders
+         WHERE stock_id = $1 AND side = 'sell' AND status IN ('open', 'partial')
+         ORDER BY limit_price ASC, created_at ASC, id ASC LIMIT 1) AS best_ask,
+       (SELECT COALESCE(SUM(remaining), 0) FROM bank_stock_orders
+         WHERE stock_id = $1 AND side = 'sell' AND status IN ('open', 'partial')) AS ask_shares`,
+    [stock.id],
+  );
+  const trades = await pool.query(
+    `SELECT shares, execution_price, created_at
+       FROM bank_stock_trades
+      WHERE stock_id = $1
+      ORDER BY created_at DESC, id DESC LIMIT 3`,
+    [stock.id],
+  );
+  return {
+    ...stock,
+    market_cap: stock.current_price * stock.total_shares,
+    evaluation: result.rows[0] ?? null,
+    orderBook: orderBook.rows[0],
+    recentTrades: trades.rows,
+  };
 }
 
 export async function createStock(
   guildId: string,
   createdBy: string,
   name: string,
-  stockTicker: string,
+  description: string,
   price: number,
   initialShares: number,
   holderDiscordId: string,
   reason: string,
 ) {
-  const normalizedTicker = stockTicker.trim().toUpperCase();
-  if (!/^[A-Z0-9]{1,12}$/.test(normalizedTicker)) {
-    throw new Error("티커는 영문 대문자와 숫자 1~12자로 입력하세요.");
+  const normalizedName = name.normalize("NFC").trim().replace(/\s+/g, " ");
+  const normalizedDescription = description.trim();
+  if (!normalizedName || normalizedName.length > 60) {
+    throw new Error("종목 이름은 1~60자여야 합니다.");
+  }
+  if (!normalizedDescription || normalizedDescription.length > 500) {
+    throw new Error("종목 소개는 1~500자로 입력하세요.");
   }
   return inTransaction(async (client) => {
     const holder = await getAccount(guildId, holderDiscordId, client, true);
+    const duplicate = await client.query(
+      `SELECT 1 FROM bank_stocks
+        WHERE guild_id = $1 AND lower(trim(name)) = lower(trim($2))
+        LIMIT 1`,
+      [guildId, normalizedName],
+    );
+    if (duplicate.rowCount) {
+      throw new Error("같은 이름의 종목이 이미 있습니다. 기존 종목 이름을 확인하세요.");
+    }
     const stock = await client.query<{ id: number }>(
-      `INSERT INTO bank_stocks (guild_id, name, ticker, current_price, total_shares)
-       VALUES ($1, $2, upper($3), $4, $5) RETURNING id`,
-      [guildId, name.trim(), normalizedTicker, price, initialShares],
+      `INSERT INTO bank_stocks (guild_id, name, description, current_price, total_shares)
+       VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      [guildId, normalizedName, normalizedDescription, price, initialShares],
     );
     await client.query(
       `INSERT INTO bank_stock_holdings (stock_id, account_id, shares)
@@ -1635,9 +1696,35 @@ export async function createStock(
     await client.query(
       `INSERT INTO bank_market_news (guild_id, stock_id, title, content, created_by)
        VALUES ($1, $2, '신규 상장', $3, $4)`,
-      [guildId, stock.rows[0].id, reason, createdBy],
+      [guildId, stock.rows[0].id, `${normalizedDescription}\n상장 사유: ${reason}`, createdBy],
     );
-    return { ticker: normalizedTicker, initialShares, price };
+    return { name: normalizedName, description: normalizedDescription, initialShares, price };
+  });
+}
+
+export async function updateStockDescription(
+  guildId: string,
+  authorId: string,
+  stockName: string,
+  description: string,
+  reason: string,
+) {
+  const normalizedDescription = description.trim();
+  if (!normalizedDescription || normalizedDescription.length > 500) {
+    throw new Error("종목 소개는 1~500자로 입력하세요.");
+  }
+  return inTransaction(async (client) => {
+    const stock = await findStock(guildId, stockName, client, true);
+    await client.query(
+      `UPDATE bank_stocks SET description = $1 WHERE id = $2`,
+      [normalizedDescription, stock.id],
+    );
+    await client.query(
+      `INSERT INTO bank_market_news (guild_id, stock_id, title, content, created_by)
+       VALUES ($1, $2, '종목 소개 수정', $3, $4)`,
+      [guildId, stock.id, `${normalizedDescription}\n변경 사유: ${reason}`, authorId],
+    );
+    return { ...stock, description: normalizedDescription };
   });
 }
 
@@ -1706,7 +1793,7 @@ export async function cancelMarketOrders(guildId: string, date: string) {
 export async function placeOrder(
   guildId: string,
   discordUserId: string,
-  stockTicker: string,
+  stockName: string,
   side: "buy" | "sell",
   quantity: number,
   limitPrice: number,
@@ -1716,7 +1803,7 @@ export async function placeOrder(
   }
   return inTransaction(async (client) => {
     const account = await getAccount(guildId, discordUserId, client, true);
-    const stock = await findStock(guildId, stockTicker, client, true);
+    const stock = await findStock(guildId, stockName, client, true);
     const base = await baseCurrency(guildId, client);
     if (side === "buy") {
       const cost = quantity * limitPrice;
@@ -1835,7 +1922,7 @@ export async function placeOrder(
         targetId: sellerId,
         currencyId: base.id,
         amount: gross,
-        description: `${stock.ticker} ${fill}주 매수`,
+        description: `${stock.name} ${fill}주 매수`,
         metadata: { stockId: stock.id, shares: fill, price: executionPrice },
       });
       await recordTransaction(client, {
@@ -1846,7 +1933,7 @@ export async function placeOrder(
         currencyId: base.id,
         amount: gross - fee,
         fee,
-        description: `${stock.ticker} ${fill}주 매도`,
+        description: `${stock.name} ${fill}주 매도`,
         metadata: { stockId: stock.id, shares: fill, price: executionPrice },
       });
       remaining -= fill;
@@ -1865,7 +1952,7 @@ export async function placeOrder(
 export async function listOrders(guildId: string, discordUserId: string) {
   const account = await getAccount(guildId, discordUserId, pool, false, true);
   const result = await pool.query(
-    `SELECT o.id, s.ticker, o.side, o.limit_price, o.quantity, o.remaining, o.status
+    `SELECT o.id, s.name, o.side, o.limit_price, o.quantity, o.remaining, o.status
        FROM bank_stock_orders o JOIN bank_stocks s ON s.id = o.stock_id
       WHERE o.guild_id = $1 AND o.account_id = $2
         AND o.status IN ('open', 'partial')
@@ -1917,11 +2004,11 @@ export async function cancelOrder(
 export async function portfolio(guildId: string, discordUserId: string) {
   const account = await getAccount(guildId, discordUserId, pool, false, true);
   const result = await pool.query(
-    `SELECT s.name, s.ticker, s.current_price, h.shares,
+    `SELECT s.name, s.current_price, h.shares,
             h.shares * s.current_price AS market_value, s.listed
        FROM bank_stock_holdings h JOIN bank_stocks s ON s.id = h.stock_id
       WHERE s.guild_id = $1 AND h.account_id = $2 AND h.shares > 0
-      ORDER BY s.listed DESC, s.ticker`,
+      ORDER BY s.listed DESC, lower(s.name), s.name`,
     [guildId, account.id],
   );
   return result.rows;
@@ -1929,11 +2016,11 @@ export async function portfolio(guildId: string, discordUserId: string) {
 
 export async function removeStock(
   guildId: string,
-  stockTicker: string,
+  stockName: string,
   reason: string,
 ) {
   return inTransaction(async (client) => {
-    const stock = await findStock(guildId, stockTicker, client, true);
+    const stock = await findStock(guildId, stockName, client, true);
     const openOrders = await client.query<{ account_id: number }>(
       `SELECT DISTINCT account_id FROM bank_stock_orders
         WHERE stock_id = $1 AND status IN ('open', 'partial')`,
@@ -1957,7 +2044,7 @@ export async function removeStock(
 export async function alterShares(
   guildId: string,
   actorUserId: string,
-  stockTicker: string,
+  stockName: string,
   holderUserId: string,
   shares: number,
   operation: "issue" | "burn",
@@ -1966,7 +2053,7 @@ export async function alterShares(
   return inTransaction(async (client) => {
     await getOrCreateAccount(guildId, actorUserId, client);
     const holder = await getAccount(guildId, holderUserId, client, true, true);
-    const stock = await findStock(guildId, stockTicker, client, true);
+    const stock = await findStock(guildId, stockName, client, true);
     if (operation === "issue") {
       await client.query(
         `UPDATE bank_stocks SET total_shares = total_shares + $1 WHERE id = $2`,
@@ -2023,7 +2110,7 @@ export async function alterShares(
 export async function saveEvaluation(
   guildId: string,
   evaluatorUserId: string,
-  tickerValue: string,
+  stockName: string,
   scores: {
     content: number;
     activity: number;
@@ -2041,7 +2128,7 @@ export async function saveEvaluation(
     throw new Error("평가는 한국 시간 20:30~21:00 사이에만 등록할 수 있습니다.");
   }
   return inTransaction(async (client) => {
-    const stock = await findStock(guildId, tickerValue, client, true);
+    const stock = await findStock(guildId, stockName, client, true);
     const conflict = await client.query(
       `SELECT 1 FROM bank_stock_officers
         WHERE stock_id = $1 AND discord_user_id = $2`,
@@ -2149,30 +2236,38 @@ function changeRange(score: number): [number, number] {
 export async function publishEvaluations(
   guildId: string,
   date: string,
-  tickerValue?: string,
+  stockName?: string,
 ) {
   return inTransaction(async (client) => {
     const evaluationsResult = await client.query<{
       id: number;
       stock_id: number;
-      ticker: string;
       name: string;
       old_price: number;
       new_price: number;
+      content_score: number;
+      activity_score: number;
+      membership_score: number;
+      events_score: number;
+      growth_score: number;
+      influence_score: number;
+      opinion_score: number;
       base_score: number;
       random_score: number;
       final_score: number;
       change_percent: number;
       evidence: string;
     }>(
-      `SELECT e.id, e.stock_id, s.ticker, s.name, e.old_price, e.new_price,
+      `SELECT e.id, e.stock_id, s.name, e.old_price, e.new_price,
+              e.content_score, e.activity_score, e.membership_score,
+              e.events_score, e.growth_score, e.influence_score, e.opinion_score,
               e.base_score, e.random_score, e.final_score, e.change_percent, e.evidence
          FROM bank_stock_evaluations e
          JOIN bank_stocks s ON s.id = e.stock_id
         WHERE e.guild_id = $1 AND e.evaluation_date = $2 AND e.status = 'pending'
-          AND ($3::text IS NULL OR lower(s.ticker) = lower($3))
-        ORDER BY s.ticker FOR UPDATE OF e`,
-      [guildId, date, tickerValue ?? null],
+          AND ($3::text IS NULL OR lower(trim(s.name)) = lower(trim($3)))
+        ORDER BY lower(s.name), s.name FOR UPDATE OF e`,
+      [guildId, date, stockName ?? null],
     );
     if (!evaluationsResult.rowCount) {
       throw new Error("오늘 공지할 미게시 평가가 없습니다.");
@@ -2195,14 +2290,14 @@ export async function publishEvaluations(
         [
           guildId,
           evaluation.stock_id,
-          `${evaluation.name} (${evaluation.ticker}) 일일 시세`,
-          `기준가 ${evaluation.old_price} → ${evaluation.new_price} (${evaluation.change_percent >= 0 ? "+" : ""}${evaluation.change_percent}%)\n기본 점수 ${evaluation.base_score}, 무작위 점수 ${evaluation.random_score >= 0 ? "+" : ""}${evaluation.random_score}, 최종 ${evaluation.final_score}점.\n근거: ${evaluation.evidence}`,
+          `${evaluation.name} 일일 시세`,
+          `기준가 ${evaluation.old_price} → ${evaluation.new_price} (${evaluation.change_percent >= 0 ? "+" : ""}${evaluation.change_percent}%)\n세부 점수: 콘텐츠 ${evaluation.content_score}, 활동 ${evaluation.activity_score}, 인원 ${evaluation.membership_score}, 주요 사건 ${evaluation.events_score}, 성장 ${evaluation.growth_score}, 영향력 ${evaluation.influence_score}, 여론 ${evaluation.opinion_score}\n기본 ${evaluation.base_score}점 + 무작위 ${evaluation.random_score >= 0 ? "+" : ""}${evaluation.random_score}점 = 최종 ${evaluation.final_score}점.\n근거: ${evaluation.evidence}`,
           "system",
         ],
       );
       reports.push(evaluation);
     }
-    if (!tickerValue) {
+    if (!stockName) {
       await client.query(
         `INSERT INTO bank_market_cycles (guild_id, cycle_date, stage)
          VALUES ($1, $2, 'publish') ON CONFLICT DO NOTHING`,
@@ -2239,22 +2334,22 @@ export async function addMarketNews(
   authorId: string,
   title: string,
   content: string,
-  tickerValue?: string,
+  stockName?: string,
 ) {
-  const stockId = tickerValue
-    ? (await findStock(guildId, tickerValue)).id
+  const stock = stockName
+    ? await findStock(guildId, stockName)
     : null;
   await pool.query(
     `INSERT INTO bank_market_news (guild_id, stock_id, title, content, created_by)
      VALUES ($1, $2, $3, $4, $5)`,
-    [guildId, stockId, title, content, authorId],
+    [guildId, stock?.id ?? null, title, content, authorId],
   );
-  return { ticker: tickerValue?.toUpperCase() };
+  return { stockName: stock?.name ?? null };
 }
 
 export async function recentNews(guildId: string) {
   const result = await pool.query(
-    `SELECT n.title, n.content, n.created_at, s.ticker
+    `SELECT n.title, n.content, n.created_at, s.name AS stock_name
        FROM bank_market_news n
        LEFT JOIN bank_stocks s ON s.id = n.stock_id
       WHERE n.guild_id = $1
@@ -2266,11 +2361,11 @@ export async function recentNews(guildId: string) {
 
 export async function addOfficer(
   guildId: string,
-  stockTicker: string,
+  stockName: string,
   discordUserId: string,
 ) {
   return inTransaction(async (client) => {
-    const stock = await findStock(guildId, stockTicker, client, true);
+    const stock = await findStock(guildId, stockName, client, true);
     const existing = await client.query<{ count: string }>(
       `SELECT COUNT(*)::text AS count FROM bank_stock_officers WHERE stock_id = $1`,
       [stock.id],
@@ -2293,10 +2388,10 @@ export async function addOfficer(
 
 export async function removeOfficer(
   guildId: string,
-  stockTicker: string,
+  stockName: string,
   discordUserId: string,
 ) {
-  const stock = await findStock(guildId, stockTicker);
+  const stock = await findStock(guildId, stockName);
   await pool.query(
     `DELETE FROM bank_stock_officers WHERE stock_id = $1 AND discord_user_id = $2`,
     [stock.id, discordUserId],

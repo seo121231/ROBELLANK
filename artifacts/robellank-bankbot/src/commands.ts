@@ -21,12 +21,12 @@ const amount = (option: SlashCommandIntegerOption, name = "amount") =>
     .setMinValue(1)
     .setMaxValue(2_147_483_647);
 
-const ticker = (option: SlashCommandStringOption, name = "ticker") =>
+const stockName = (option: SlashCommandStringOption, name = "stock") =>
   option
     .setName(name)
-    .setDescription("종목 티커")
+    .setDescription("상장 종목 이름")
     .setRequired(true)
-    .setMaxLength(12);
+    .setMaxLength(60);
 
 const user = (option: SlashCommandUserOption, name = "user") =>
   option
@@ -468,14 +468,14 @@ export const commands = [
     .addSubcommand((sub) =>
       sub
         .setName("quote")
-        .setDescription("종목 시세·발행 주식 수를 확인합니다")
-        .addStringOption((option) => ticker(option)),
+        .setDescription("종목 소개·시세·호가·평가를 자세히 확인합니다")
+        .addStringOption((option) => stockName(option)),
     )
     .addSubcommand((sub) =>
       sub
         .setName("buy")
         .setDescription("지정가 매수 주문을 냅니다")
-        .addStringOption((option) => ticker(option))
+        .addStringOption((option) => stockName(option))
         .addIntegerOption((option) =>
           option
             .setName("shares")
@@ -497,7 +497,7 @@ export const commands = [
       sub
         .setName("sell")
         .setDescription("보유 주식의 지정가 매도 주문을 냅니다")
-        .addStringOption((option) => ticker(option))
+        .addStringOption((option) => stockName(option))
         .addIntegerOption((option) =>
           option
             .setName("shares")
@@ -664,16 +664,16 @@ export const commands = [
         .addStringOption((option) =>
           option
             .setName("name")
-            .setDescription("상장 길드 이름")
+            .setDescription("종목 이름 (서버 내에서 중복 불가)")
             .setRequired(true)
             .setMaxLength(60),
         )
         .addStringOption((option) =>
           option
-            .setName("ticker")
-            .setDescription("종목 티커 (영문·숫자)")
+            .setName("description")
+            .setDescription("길드·종목 소개와 투자 참고 정보")
             .setRequired(true)
-            .setMaxLength(12),
+            .setMaxLength(500),
         )
         .addIntegerOption((option) =>
           option
@@ -700,14 +700,14 @@ export const commands = [
       sub
         .setName("remove")
         .setDescription("상장을 폐지하고 미체결 주문을 취소합니다")
-        .addStringOption((option) => ticker(option))
+        .addStringOption((option) => stockName(option))
         .addStringOption((option) => adminReason(option)),
     )
     .addSubcommand((sub) =>
       sub
         .setName("issue")
         .setDescription("주식을 신규 발행하여 보유자에게 지급합니다")
-        .addStringOption((option) => ticker(option))
+        .addStringOption((option) => stockName(option))
         .addUserOption((option) => user(option, "holder"))
         .addIntegerOption((option) =>
           option
@@ -723,7 +723,7 @@ export const commands = [
       sub
         .setName("burn")
         .setDescription("보유 주식을 소각합니다")
-        .addStringOption((option) => ticker(option))
+        .addStringOption((option) => stockName(option))
         .addUserOption((option) => user(option, "holder"))
         .addIntegerOption((option) =>
           option
@@ -738,12 +738,12 @@ export const commands = [
     .addSubcommand((sub) =>
       sub
         .setName("evaluate")
-        .setDescription("오늘의 점수와 근거를 등록합니다")
-        .addStringOption((option) => ticker(option))
+        .setDescription("종목의 세부 평가 점수와 근거를 등록합니다")
+        .addStringOption((option) => stockName(option))
         .addIntegerOption((option) =>
           option
             .setName("content")
-            .setDescription("게임 콘텐츠 성과: -6~6")
+            .setDescription("게임 콘텐츠 성과·업데이트: -6~6")
             .setRequired(true)
             .setMinValue(-6)
             .setMaxValue(6),
@@ -751,7 +751,7 @@ export const commands = [
         .addIntegerOption((option) =>
           option
             .setName("activity")
-            .setDescription("길드 활동·이벤트: -6~6")
+            .setDescription("길드 활동·참여·이벤트: -6~6")
             .setRequired(true)
             .setMinValue(-6)
             .setMaxValue(6),
@@ -759,7 +759,7 @@ export const commands = [
         .addIntegerOption((option) =>
           option
             .setName("membership")
-            .setDescription("인원 변동: -5~5")
+            .setDescription("인원 증가·유지·감소: -5~5")
             .setRequired(true)
             .setMinValue(-5)
             .setMaxValue(5),
@@ -767,7 +767,7 @@ export const commands = [
         .addIntegerOption((option) =>
           option
             .setName("events")
-            .setDescription("주요 사건·이슈: -8~8")
+            .setDescription("운영·분쟁·주요 공지 등 사건: -8~8")
             .setRequired(true)
             .setMinValue(-8)
             .setMaxValue(8),
@@ -775,7 +775,7 @@ export const commands = [
         .addIntegerOption((option) =>
           option
             .setName("growth")
-            .setDescription("성장 가능성·지속성: -5~5")
+            .setDescription("장기 성장성·활동 지속성: -5~5")
             .setRequired(true)
             .setMinValue(-5)
             .setMaxValue(5),
@@ -783,7 +783,7 @@ export const commands = [
         .addIntegerOption((option) =>
           option
             .setName("influence")
-            .setDescription("커뮤니티 영향력·평판: -5~5")
+            .setDescription("커뮤니티 영향력·외부 평판: -5~5")
             .setRequired(true)
             .setMinValue(-5)
             .setMaxValue(5),
@@ -810,8 +810,9 @@ export const commands = [
         .setDescription("오늘 평가와 새 주가를 공지합니다")
         .addStringOption((option) =>
           option
-            .setName("ticker")
-            .setDescription("종목 (생략하면 오늘 평가 전체 공지)"),
+            .setName("stock")
+            .setDescription("종목 이름 (생략하면 오늘 평가 전체 공지)")
+            .setMaxLength(60),
         ),
     )
     .addSubcommand((sub) =>
@@ -848,23 +849,37 @@ export const commands = [
         )
         .addStringOption((option) =>
           option
-            .setName("ticker")
-            .setDescription("관련 종목 티커 (생략 가능)")
-            .setMaxLength(12),
+            .setName("stock")
+            .setDescription("관련 종목 이름 (생략 가능)")
+            .setMaxLength(60),
         ),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("describe")
+        .setDescription("종목 소개를 등록하거나 수정합니다")
+        .addStringOption((option) => stockName(option))
+        .addStringOption((option) =>
+          option
+            .setName("description")
+            .setDescription("길드·종목 소개와 투자 참고 정보")
+            .setRequired(true)
+            .setMaxLength(500),
+        )
+        .addStringOption((option) => adminReason(option)),
     )
     .addSubcommand((sub) =>
       sub
         .setName("officer-add")
         .setDescription("길드 관계자를 지정합니다 (종목별 최대 2명)")
-        .addStringOption((option) => ticker(option))
+        .addStringOption((option) => stockName(option))
         .addUserOption((option) => user(option, "officer")),
     )
     .addSubcommand((sub) =>
       sub
         .setName("officer-remove")
         .setDescription("길드 관계자 지정을 해제합니다")
-        .addStringOption((option) => ticker(option))
+        .addStringOption((option) => stockName(option))
         .addUserOption((option) => user(option, "officer")),
     ),
 ].map((command) => command.toJSON());

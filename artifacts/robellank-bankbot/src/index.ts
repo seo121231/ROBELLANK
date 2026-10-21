@@ -62,12 +62,12 @@ type PendingAction =
   | {
       kind: "shares";
       operation: "issue" | "burn";
-      ticker: string;
+      stockName: string;
       holderId: string;
       shares: number;
       reason: string;
     }
-  | { kind: "stock-remove"; ticker: string; reason: string };
+  | { kind: "stock-remove"; stockName: string; reason: string };
 
 const pendingActions = new Map<
   string,
@@ -77,10 +77,23 @@ const pendingActions = new Map<
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 let schedulerBusy = false;
 
-const format = (value: string | number) =>
-  new Intl.NumberFormat("ko-KR", { maximumFractionDigits: 0 }).format(
-    Number(value),
+const format = (value: string | number | bigint) => {
+  const formattedValue =
+    typeof value === "string" && /^-?\d+$/.test(value)
+      ? BigInt(value)
+      : Number(value);
+  return new Intl.NumberFormat("ko-KR", { maximumFractionDigits: 0 }).format(
+    formattedValue,
   );
+};
+const signed = (value: number) => `${value > 0 ? "+" : ""}${value}`;
+const formatKstDate = (value: string | Date) =>
+  new Intl.DateTimeFormat("ko-KR", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(value));
 
 const mention = (id: string) => `<@${id}>`;
 const tierRequirements: Record<TierKey, string> = {
@@ -296,17 +309,17 @@ async function handleConfirmation(interaction: ButtonInteraction) {
       await store.alterShares(
         guildId,
         interaction.user.id,
-        action.ticker,
+        action.stockName,
         action.holderId,
         action.shares,
         action.operation,
         action.reason,
       );
-      result = `${action.ticker} ${action.operation === "issue" ? "신규 발행" : "소각"} ${format(action.shares)}주 완료. ${mention(action.holderId)} · 사유: ${action.reason}`;
+      result = `${action.stockName} ${action.operation === "issue" ? "신규 발행" : "소각"} ${format(action.shares)}주 완료. ${mention(action.holderId)} · 사유: ${action.reason}`;
       await sendAnnouncement(guildId, result);
     } else if (action.kind === "stock-remove") {
-      await store.removeStock(guildId, action.ticker, action.reason);
-      result = `${action.ticker} 상장 폐지 완료. 주문은 취소했고 계좌·거래 기록은 보존했습니다.`;
+      await store.removeStock(guildId, action.stockName, action.reason);
+      result = `${action.stockName} 상장 폐지 완료. 주문은 취소했고 계좌·거래 기록은 보존했습니다.`;
       await sendAnnouncement(guildId, result);
     }
     await interaction.editReply({ content: result, components: [] });
@@ -340,10 +353,11 @@ function helpEmbed() {
         "예금·대출 이자는 매일 한국 시간 자정에 계산됩니다.",
         "",
         "**길드 가상주식**",
-        "`/stock list` 종목 · `/stock quote ticker` 시세 · `/stock buy ticker shares limit_price` 매수 주문",
-        "`/stock sell ticker shares limit_price` 매도 주문 · `/stock orders` 주문 · `/stock cancel order_id` 취소",
+        "`/stock list` 종목 목록 · `/stock quote stock` 상세 정보 · `/stock buy stock shares limit_price` 매수",
+        "`/stock sell stock shares limit_price` 매도 · `/stock orders` 주문 현황 · `/stock cancel order_id` 취소",
         "`/portfolio` 보유 현황 · `/market news` 최근 공지",
-        "주문은 유저 간 지정가로만 체결됩니다. 매수 수수료 0%, 매도 수수료 7.5%(정수 반올림)입니다.",
+        "종목은 티커 없이 이름으로 찾습니다. 상세 정보에는 기준가, 시가총액, 최고 매수·매도 호가, 최근 체결, 세부 평가가 표시됩니다.",
+        "주문은 유저 간 지정가로만 체결됩니다. 현재 기준가는 참고값이며 실제 체결가는 매칭된 주문 가격입니다. 매수 수수료 0%, 매도 수수료 7.5%(정수 반올림)입니다.",
         "20:30 미체결 주문 취소, 20:30~21:00 평가, 21:00 새 시세 공지 후 거래를 재개합니다 (한국 시간).",
         "주가는 평가 점수 구간 안에서 변동하며 하루 최대 ±20%입니다. 주식은 이벤트용 가상자산이며 실제 소유권·현금 가치를 갖지 않습니다.",
         "",
@@ -353,7 +367,7 @@ function helpEmbed() {
         "`/credit adjust` 사유별 신용점수 조정 · `/credit set` 재량 점수 설정 · `/tier-config` 한도·이자·보관·대출기간 설정",
         "`/vault add|remove` 게임에서 확인한 보관 아이템 기록 · `/freeze`, `/unfreeze`, `/supply`",
         "`/loan queue|approve|collateral-approve|collateral-return|reject` 대출 심사",
-        "`/market create|remove|issue|burn|evaluate|publish|channel|note|officer-add|officer-remove`",
+        "`/market create|describe|remove|issue|burn|evaluate|publish|channel|note|officer-add|officer-remove`",
       ].join("\n"),
     )
     .setFooter({
@@ -741,42 +755,122 @@ async function handleStock(interaction: ChatInputCommandInteraction) {
   const subcommand = interaction.options.getSubcommand();
   if (subcommand === "list") {
     const rows = await store.listStocks(guildId);
-    await replyPrivate(
-      interaction,
-      rows.length
-        ? rows
-            .map(
-              (stock) =>
-                `**${stock.ticker}** ${stock.name} · ${format(stock.current_price)} · 유통 ${format(stock.total_shares)}주`,
-            )
-            .join("\n")
-        : "상장 종목이 없습니다.",
-    );
+    if (!rows.length) {
+      await replyPrivate(interaction, "상장 종목이 없습니다.");
+      return;
+    }
+    const embed = new EmbedBuilder()
+      .setColor(0x207e66)
+      .setTitle("길드 가상주식")
+      .setDescription(
+        "종목 이름으로 검색·주문합니다. 기준가는 참고 가격이며 체결 가격은 주문 매칭 결과에 따릅니다.",
+      );
+    for (const stock of rows.slice(0, 24)) {
+      embed.addFields({
+        name: stock.name,
+        value:
+          `기준가 **${format(stock.current_price)}** · ` +
+          `일간 ${stock.change_percent === null ? "평가 전" : `${signed(stock.change_percent)}%`}\n` +
+          `유통 ${format(stock.total_shares)}주 · 시가총액 ${format(stock.market_cap)}`,
+        inline: false,
+      });
+    }
+    embed.setFooter({
+      text:
+        rows.length > 24
+          ? `총 ${rows.length}종목 · 목록에는 이름순 24종목 표시`
+          : `총 ${rows.length}종목 · 자세한 내용은 /stock quote`,
+    });
+    await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
   } else if (subcommand === "quote") {
     const stock = await store.quoteStock(
       guildId,
-      interaction.options.getString("ticker", true),
+      interaction.options.getString("stock", true),
     );
     const evaluation = stock.evaluation as
       | {
+          evaluation_date: string;
+          content_score: number;
+          activity_score: number;
+          membership_score: number;
+          events_score: number;
+          growth_score: number;
+          influence_score: number;
+          opinion_score: number;
+          base_score: number;
+          random_score: number;
           final_score: number;
           change_percent: number;
           old_price: number;
           new_price: number;
           evidence: string;
         }
-      | undefined;
+      | null;
+    const orderBook = stock.orderBook as {
+      best_bid: number | null;
+      bid_shares: string | number;
+      best_ask: number | null;
+      ask_shares: string | number;
+    };
+    const recentTrades = stock.recentTrades as {
+      shares: number;
+      execution_price: number;
+      created_at: string | Date;
+    }[];
+    const evaluationSummary = evaluation
+      ? [
+          `평가일 **${formatKstDate(evaluation.evaluation_date)}**`,
+          `기본 ${signed(evaluation.base_score)}점 + 무작위 ${signed(evaluation.random_score)}점 = **${signed(evaluation.final_score)}점**`,
+          `콘텐츠 ${signed(evaluation.content_score)}/6 · 활동 ${signed(evaluation.activity_score)}/6 · 인원 ${signed(evaluation.membership_score)}/5`,
+          `주요 사건 ${signed(evaluation.events_score)}/8 · 성장 ${signed(evaluation.growth_score)}/5 · 영향력 ${signed(evaluation.influence_score)}/5 · 여론 ${signed(evaluation.opinion_score)}/5`,
+          `가격 ${format(evaluation.old_price)} → ${format(evaluation.new_price)} (${signed(evaluation.change_percent)}%)`,
+        ].join("\n")
+      : "아직 공개된 평가가 없습니다.";
     const embed = new EmbedBuilder()
       .setColor(0x207e66)
-      .setTitle(`${stock.name} (${stock.ticker})`)
+      .setTitle(stock.name)
+      .setDescription(stock.description || "종목 소개가 아직 등록되지 않았습니다.")
       .addFields(
-        { name: "기준 주가", value: `${format(stock.current_price)} 기본재화`, inline: true },
-        { name: "발행·유통 주식", value: `${format(stock.total_shares)}주`, inline: true },
         {
-          name: "최근 평가",
-          value: evaluation
-            ? `${evaluation.final_score}점 · ${evaluation.change_percent >= 0 ? "+" : ""}${evaluation.change_percent}%\n${evaluation.evidence}`
-            : "아직 발표된 평가가 없습니다.",
+          name: "현재 기준가",
+          value:
+            `${format(stock.current_price)} 기본재화` +
+            (evaluation ? ` · ${signed(evaluation.change_percent)}%` : ""),
+          inline: true,
+        },
+        {
+          name: "발행·유통 규모",
+          value:
+            `${format(stock.total_shares)}주\n` +
+            `시가총액 ${format(stock.market_cap)} 기본재화`,
+          inline: true,
+        },
+        {
+          name: "주문 호가",
+          value:
+            `최고 매수: ${orderBook.best_bid === null ? "없음" : `${format(orderBook.best_bid)} · ${format(orderBook.bid_shares)}주`}\n` +
+            `최저 매도: ${orderBook.best_ask === null ? "없음" : `${format(orderBook.best_ask)} · ${format(orderBook.ask_shares)}주`}`,
+          inline: false,
+        },
+        {
+          name: "최근 세부 평가",
+          value: evaluationSummary,
+          inline: false,
+        },
+        ...(evaluation
+          ? [{ name: "평가 근거", value: evaluation.evidence, inline: false }]
+          : []),
+        {
+          name: "최근 체결",
+          value: recentTrades.length
+            ? recentTrades
+                .map(
+                  (trade) =>
+                    `<t:${Math.floor(new Date(trade.created_at).getTime() / 1000)}:R> · ${format(trade.shares)}주 × ${format(trade.execution_price)}`,
+                )
+                .join("\n")
+            : "아직 체결된 거래가 없습니다.",
+          inline: false,
         },
       );
     await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
@@ -784,14 +878,14 @@ async function handleStock(interaction: ChatInputCommandInteraction) {
     const result = await store.placeOrder(
       guildId,
       interaction.user.id,
-      interaction.options.getString("ticker", true),
+      interaction.options.getString("stock", true),
       subcommand,
       interaction.options.getInteger("shares", true),
       interaction.options.getInteger("limit_price", true),
     );
     const message =
-      `주문 #${result.orderId} 접수: ${result.stock.ticker} ${format(interaction.options.getInteger("shares", true))}주 ${subcommand === "buy" ? "매수" : "매도"}. ` +
-      `즉시 체결 ${format(result.filled)}주 · 미체결 ${format(result.remaining)}주.`;
+      `**${result.stock.name}** 주문 #${result.orderId} · ${subcommand === "buy" ? "매수" : "매도"} ${format(interaction.options.getInteger("shares", true))}주\n` +
+      `지정가 ${format(interaction.options.getInteger("limit_price", true))} · 즉시 체결 ${format(result.filled)}주 · 미체결 ${format(result.remaining)}주.`;
     await replyPrivate(interaction, message);
   } else if (subcommand === "orders") {
     const rows = await store.listOrders(guildId, interaction.user.id);
@@ -801,7 +895,7 @@ async function handleStock(interaction: ChatInputCommandInteraction) {
         ? rows
             .map(
               (order) =>
-                `#${order.id} ${order.ticker} ${order.side === "buy" ? "매수" : "매도"} · ${format(order.limit_price)} × ${format(order.remaining)}/${format(order.quantity)}주`,
+                `**${order.name}** · #${order.id} ${order.side === "buy" ? "매수" : "매도"} · 지정가 ${format(order.limit_price)}\n${order.status === "partial" ? "일부 체결" : "대기 중"} · 체결 ${format(order.quantity - order.remaining)}/${format(order.quantity)}주 · 잔량 ${format(order.remaining)}주`,
             )
             .join("\n")
         : "미체결 주문이 없습니다.",
@@ -895,7 +989,7 @@ async function handleMarket(interaction: ChatInputCommandInteraction) {
         ? rows
             .map(
               (item) =>
-                `**${item.ticker ? `${item.ticker} · ` : ""}${item.title}**\n${item.content}`,
+                `**${item.stock_name ? `${item.stock_name} · ` : ""}${item.title}**\n${item.content}`,
             )
             .join("\n\n")
         : "등록된 시장 공지가 없습니다.",
@@ -908,25 +1002,27 @@ async function handleMarket(interaction: ChatInputCommandInteraction) {
       guildId,
       interaction.user.id,
       interaction.options.getString("name", true),
-      interaction.options.getString("ticker", true),
+      interaction.options.getString("description", true),
       interaction.options.getInteger("price", true),
       interaction.options.getInteger("initial_shares", true),
       interaction.options.getUser("holder", true).id,
       interaction.options.getString("reason", true),
     );
-    const message = `${result.ticker} 신규 상장: 기준 주가 ${format(result.price)}, 초기 유통 ${format(result.initialShares)}주.`;
+    const message =
+      `**${result.name} 신규 상장**\n${result.description}\n` +
+      `기준가 ${format(result.price)} · 초기 발행 ${format(result.initialShares)}주`;
     await replyPrivate(interaction, message);
     await sendAnnouncement(guildId, message);
   } else if (subcommand === "remove") {
-    const tickerValue = interaction.options.getString("ticker", true);
+    const stockName = interaction.options.getString("stock", true);
     const reason = interaction.options.getString("reason", true);
     await queueConfirmation(
       interaction,
-      { kind: "stock-remove", ticker: tickerValue, reason },
-      `${tickerValue} 상장을 폐지하고 미체결 주문을 취소합니다. 보유 주식과 거래 기록은 삭제되지 않습니다. 사유: ${reason}`,
+      { kind: "stock-remove", stockName, reason },
+      `${stockName} 상장을 폐지하고 미체결 주문을 취소합니다. 보유 주식과 거래 기록은 삭제되지 않습니다. 사유: ${reason}`,
     );
   } else if (subcommand === "issue" || subcommand === "burn") {
-    const tickerValue = interaction.options.getString("ticker", true);
+    const stockName = interaction.options.getString("stock", true);
     const holderId = interaction.options.getUser("holder", true).id;
     const shares = interaction.options.getInteger("shares", true);
     const reason = interaction.options.getString("reason", true);
@@ -935,18 +1031,18 @@ async function handleMarket(interaction: ChatInputCommandInteraction) {
       {
         kind: "shares",
         operation: subcommand,
-        ticker: tickerValue,
+        stockName,
         holderId,
         shares,
         reason,
       },
-      `${tickerValue} ${subcommand === "issue" ? "신규 발행" : "소각"} ${format(shares)}주, 보유자 ${mention(holderId)}. 변경 사유와 수량을 확인하세요: ${reason}`,
+      `${stockName} ${subcommand === "issue" ? "신규 발행" : "소각"} ${format(shares)}주, 보유자 ${mention(holderId)}. 변경 사유와 수량을 확인하세요: ${reason}`,
     );
   } else if (subcommand === "evaluate") {
     const result = await store.saveEvaluation(
       guildId,
       interaction.user.id,
-      interaction.options.getString("ticker", true),
+      interaction.options.getString("stock", true),
       {
         content: interaction.options.getInteger("content", true),
         activity: interaction.options.getInteger("activity", true),
@@ -965,20 +1061,24 @@ async function handleMarket(interaction: ChatInputCommandInteraction) {
         : `${result.change_percent}`;
     await replyPrivate(
       interaction,
-      `${result.stock.ticker} 오늘 평가 저장: 기본 ${result.base_score}점, 무작위 ${result.random_score >= 0 ? "+" : ""}${result.random_score}점, 최종 ${result.final_score}점. 변동률 ${change}% (주가 ${format(result.old_price)} → ${format(result.new_price)}). 21:00에 공지됩니다.`,
+      `**${result.stock.name} 평가 저장**\n` +
+        `콘텐츠 ${signed(interaction.options.getInteger("content", true))}/6 · 활동 ${signed(interaction.options.getInteger("activity", true))}/6 · 인원 ${signed(interaction.options.getInteger("membership", true))}/5 · 사건 ${signed(interaction.options.getInteger("events", true))}/8 · 성장 ${signed(interaction.options.getInteger("growth", true))}/5 · 영향력 ${signed(interaction.options.getInteger("influence", true))}/5 · 여론 ${signed(interaction.options.getInteger("opinion", true))}/5\n` +
+        `기본 ${result.base_score}점 + 무작위 ${signed(result.random_score)}점 = 최종 ${result.final_score}점 · 변동률 ${change}% · 기준가 ${format(result.old_price)} → ${format(result.new_price)}\n` +
+        `21:00 시세 공지 예정. 근거: ${interaction.options.getString("evidence", true)}`,
     );
   } else if (subcommand === "publish") {
-    const tickerValue = interaction.options.getString("ticker") ?? undefined;
+    const stockName = interaction.options.getString("stock") ?? undefined;
     const reports = await store.publishEvaluations(
       guildId,
       store.todayKst(),
-      tickerValue,
+      stockName,
     );
     const lines = reports.map(
       (report) =>
-        `**${report.ticker}** ${format(report.old_price)} → ${format(report.new_price)} (${report.change_percent >= 0 ? "+" : ""}${report.change_percent}%) · 최종 ${report.final_score}점 · ${report.evidence}`,
+        `**${report.name}** · 기준가 ${format(report.old_price)} → ${format(report.new_price)} (${signed(report.change_percent)}%)\n` +
+        `평가 ${signed(report.final_score)}점 (콘텐츠 ${signed(report.content_score)}, 활동 ${signed(report.activity_score)}, 인원 ${signed(report.membership_score)}, 사건 ${signed(report.events_score)}, 성장 ${signed(report.growth_score)}, 영향력 ${signed(report.influence_score)}, 여론 ${signed(report.opinion_score)}) · ${report.evidence}`,
     );
-    const content = `오늘 가상주식 시세 발표\n${lines.join("\n")}`;
+    const content = `오늘 가상주식 시세 발표\n${lines.join("\n\n")}`;
     await replyPrivate(interaction, content);
     await sendAnnouncement(guildId, content);
   } else if (subcommand === "channel") {
@@ -989,7 +1089,7 @@ async function handleMarket(interaction: ChatInputCommandInteraction) {
     await store.setAnnouncementChannel(guildId, channel.id);
     await replyPrivate(interaction, `시세·뉴스 공지 채널을 ${channel}로 설정했습니다.`);
   } else if (subcommand === "note") {
-    const tickerValue = interaction.options.getString("ticker") ?? undefined;
+    const stockName = interaction.options.getString("stock") ?? undefined;
     const title = interaction.options.getString("title", true);
     const content = interaction.options.getString("content", true);
     const stock = await store.addMarketNews(
@@ -997,28 +1097,39 @@ async function handleMarket(interaction: ChatInputCommandInteraction) {
       interaction.user.id,
       title,
       content,
-      tickerValue,
+      stockName,
     );
-    const message = `**[시장 뉴스${stock.ticker ? ` · ${stock.ticker}` : ""}] ${title}**\n${content}`;
+    const message = `**[시장 뉴스${stock.stockName ? ` · ${stock.stockName}` : ""}] ${title}**\n${content}`;
     await replyPrivate(interaction, "시장을 공지했습니다.");
+    await sendAnnouncement(guildId, message);
+  } else if (subcommand === "describe") {
+    const stock = await store.updateStockDescription(
+      guildId,
+      interaction.user.id,
+      interaction.options.getString("stock", true),
+      interaction.options.getString("description", true),
+      interaction.options.getString("reason", true),
+    );
+    const message = `**${stock.name} 종목 소개 수정**\n${stock.description}`;
+    await replyPrivate(interaction, message);
     await sendAnnouncement(guildId, message);
   } else if (subcommand === "officer-add") {
     const stock = await store.addOfficer(
       guildId,
-      interaction.options.getString("ticker", true),
+      interaction.options.getString("stock", true),
       interaction.options.getUser("officer", true).id,
     );
     await replyPrivate(
       interaction,
-      `${stock.ticker} 관계자를 지정했습니다. 종목별 최대 2명이며 해당 관계자는 소속 종목 평가에서 제외됩니다.`,
+      `${stock.name} 관계자를 지정했습니다. 종목별 최대 2명이며 해당 관계자는 소속 종목 평가에서 제외됩니다.`,
     );
   } else if (subcommand === "officer-remove") {
     const stock = await store.removeOfficer(
       guildId,
-      interaction.options.getString("ticker", true),
+      interaction.options.getString("stock", true),
       interaction.options.getUser("officer", true).id,
     );
-    await replyPrivate(interaction, `${stock.ticker} 관계자 지정을 해제했습니다.`);
+    await replyPrivate(interaction, `${stock.name} 관계자 지정을 해제했습니다.`);
   }
 }
 
@@ -1101,7 +1212,9 @@ async function handleCommand(interaction: ChatInputCommandInteraction) {
           ? rows
               .map(
                 (row) =>
-                  `<t:${Math.floor(new Date(row.created_at).getTime() / 1000)}:R> · ${row.description || row.type} · ${format(row.amount)} ${row.currency}${Number(row.fee) ? ` (수수료 ${format(row.fee)})` : ""}`,
+                  `<t:${Math.floor(new Date(row.created_at).getTime() / 1000)}:R> · ` +
+                  `${row.stock_name ? `${row.type === "stock_buy" ? "주식 매수" : "주식 매도"} · ${row.stock_name} ${format(row.shares)}주 @ ${format(row.execution_price)}` : row.description || row.type} · ` +
+                  `${format(row.amount)} ${row.currency}${Number(row.fee) ? ` (수수료 ${format(row.fee)})` : ""}`,
               )
               .join("\n")
           : "거래 내역이 없습니다.",
@@ -1197,17 +1310,30 @@ async function handleCommand(interaction: ChatInputCommandInteraction) {
       break;
     case "portfolio": {
       const rows = await store.portfolio(guildId, interaction.user.id);
-      await replyPrivate(
-        interaction,
-        rows.length
-          ? rows
-              .map(
-                (row) =>
-                  `**${row.ticker}** ${row.name} · ${format(row.shares)}주 × ${format(row.current_price)} = ${format(row.market_value)}${row.listed ? "" : " · 상장 폐지"}`,
-              )
-              .join("\n")
-          : "보유 중인 가상주식이 없습니다.",
-      );
+      if (!rows.length) {
+        await replyPrivate(interaction, "보유 중인 가상주식이 없습니다.");
+        break;
+      }
+      const embed = new EmbedBuilder()
+        .setColor(0x207e66)
+        .setTitle("내 가상주식 포트폴리오")
+        .setDescription("현재 기준가로 계산한 참고 평가액입니다. 실제 매도 금액과 다를 수 있습니다.");
+      for (const row of rows.slice(0, 24)) {
+        embed.addFields({
+          name: row.name,
+          value:
+            `${format(row.shares)}주 × 기준가 ${format(row.current_price)}\n` +
+            `현재 평가액 **${format(row.market_value)}**${row.listed ? "" : " · 상장 폐지"}`,
+          inline: false,
+        });
+      }
+      embed.setFooter({
+        text:
+          rows.length > 24
+            ? `총 ${rows.length}종목 · 이름순 24종목 표시`
+            : `보유 종목 ${rows.length}개`,
+      });
+      await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
       break;
     }
     case "currency":

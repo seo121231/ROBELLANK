@@ -23,9 +23,9 @@ Discord 슬래시 명령으로 운영하는 서버별 가상 은행과 길드 �
 | `/tier` | 현재 등급·신용점수·대출 한도·혜택 확인 |
 | `/currency list` | 활성 재화, 환전가치, 일일 이자율 확인 |
 | `/stock list` | 상장 종목과 현재 기준 주가 확인 |
-| `/stock quote ticker` | 종목 시세와 최근 공개 평가 확인 |
-| `/stock buy ticker shares limit_price` | 지정가 매수. 주문 금액을 지갑에서 먼저 확보 |
-| `/stock sell ticker shares limit_price` | 보유 주식 지정가 매도 |
+| `/stock quote stock` | 종목 소개, 기준가, 시가총액, 호가, 최근 체결, 세부 평가 확인 |
+| `/stock buy stock shares limit_price` | 종목 이름으로 지정가 매수. 주문 금액을 지갑에서 먼저 확보 |
+| `/stock sell stock shares limit_price` | 종목 이름으로 보유 주식 지정가 매도 |
 | `/stock orders` | 본인 미체결 주식 주문 확인 |
 | `/stock cancel order_id` | 본인 미체결 주문 취소 |
 | `/portfolio` | 보유 주식과 현재 기준 평가액 |
@@ -51,20 +51,23 @@ Discord 슬래시 명령으로 운영하는 서버별 가상 은행과 길드 �
 | `/credit set user score reason` | 관리자 재량으로 신용점수 직접 설정 |
 | `/loan approve loan_id` | 대기 중 대출 승인 및 지급 (확인 버튼) |
 | `/loan reject loan_id reason` | 대기 중 대출 거절 (확인 버튼) |
-| `/market create name ticker price initial_shares holder reason` | 상장 및 초기 주식 발행. 초기 보유자는 계좌가 있어야 함 |
-| `/market remove ticker reason` | 상장 폐지, 미체결 주문 취소. 보유 및 거래 기록은 보존 (확인 버튼) |
-| `/market issue ticker holder shares reason` | 주식 신규 발행 및 지정 사용자에게 지급 (확인 버튼) |
-| `/market burn ticker holder shares reason` | 지정 사용자의 주식 소각 (확인 버튼) |
-| `/market officer-add ticker officer` | 종목별 관계자 지정 (최대 2명) |
-| `/market officer-remove ticker officer` | 관계자 지정 해제 |
-| `/market evaluate ticker content activity membership events growth influence opinion evidence` | 합의된 점수와 근거 입력. 점수별 허용 범위는 Discord 명령 설명에 표시 |
-| `/market publish [ticker]` | 오늘의 미게시 평가와 새 주가 발표 |
+| `/market create name description price initial_shares holder reason` | 이름으로 종목 상장, 소개 등록 및 초기 주식 발행 |
+| `/market describe stock description reason` | 종목 소개 수정. 이전 소개는 공지 내역에 보존 |
+| `/market remove stock reason` | 이름으로 상장 폐지, 미체결 주문 취소. 보유 및 거래 기록은 보존 (확인 버튼) |
+| `/market issue stock holder shares reason` | 주식 신규 발행 및 지정 사용자에게 지급 (확인 버튼) |
+| `/market burn stock holder shares reason` | 지정 사용자의 주식 소각 (확인 버튼) |
+| `/market officer-add stock officer` | 종목별 관계자 지정 (최대 2명) |
+| `/market officer-remove stock officer` | 관계자 지정 해제 |
+| `/market evaluate stock content activity membership events growth influence opinion evidence` | 이름으로 종목을 골라 세부 점수와 근거 입력 |
+| `/market publish [stock]` | 오늘의 미게시 평가와 새 주가 발표 |
 | `/market channel channel` | 시세·뉴스 자동 공지 채널 설정 |
-| `/market note [ticker] title content` | 확인된 시장 소식 공지 |
+| `/market note [stock] title content` | 종목 이름을 연결해 확인된 시장 소식을 공지 |
 
 ## 시장 운영 규칙
 
 - 주문은 유저 간 지정가 주문끼리 가격이 맞을 때만 체결됩니다. 상대 주문이 없으면 미체결 상태로 남습니다.
+- 티커는 사용하지 않습니다. 서버 안에서 중복되지 않는 종목 이름으로 조회·주문하고, 거래·보유 기록은 내부 종목 ID에 계속 연결해 이름 변경과 무관하게 보존합니다.
+- 종목 상세에는 소개, 기준가, 유통 주식 수, 시가총액, 최고 매수·최저 매도 호가, 최근 체결 3건, 최근 평가 세부 점수와 근거를 표시합니다. 기존 종목은 관리자가 `/market describe`로 소개를 등록할 수 있습니다.
 - 매수 수수료는 없습니다. 매도 수수료는 체결 금액의 7.5%이며, 재화가 정수라 수수료를 가장 가까운 정수로 반올림합니다.
 - 매수 주문은 최대 주문 금액을 미리 확보하고, 취소·마감 때 미체결분을 돌려줍니다. 매도 주문은 보유 주식 수량 안에서만 낼 수 있습니다.
 - 매일 한국 시간 20:30에 주문을 마감하고 미체결 주문을 취소합니다. 20:30~21:00에는 시세 산정, 21:00부터 새 기준 주가로 거래가 재개됩니다.
