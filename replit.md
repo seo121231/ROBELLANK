@@ -32,6 +32,8 @@ Discord 서버에서 가상 통화·계좌와 길드 가상주식 시장을 운�
 - Discord gateway bot runs as a dedicated console workflow; it does not depend on the API server process.
 - Market scores and user-entered evidence are stored separately from the trading ledger; unpublished evaluations can be corrected before publication.
 - Buy order funds are escrowed; open orders are refunded when cancelled or at the daily market close.
+- Discord tier roles are assigned manually by server administrators; the bot must never grant or change roles. New bank accounts start at 50 credit points.
+- Game currency is verified by an administrator in-game and then issued to the bank through the confirmed `/mint` flow; users do not self-register currency balances.
 
 ## Product
 

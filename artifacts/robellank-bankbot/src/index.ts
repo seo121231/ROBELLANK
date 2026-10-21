@@ -18,6 +18,7 @@ import {
 } from "discord.js";
 import pino from "pino";
 import { commands } from "./commands";
+import { getCreditAdjustment } from "./credit-adjustments";
 import * as store from "./store";
 import { getTier, resolveTier, tierAtLeast } from "./tiers";
 import type { TierKey } from "./tiers";
@@ -86,7 +87,7 @@ const tierRequirements: Record<TierKey, string> = {
   bronze: "기본 등급",
   silver: "캐릭터 50레벨 이상 · 리더보드 25레벨 이상 · 신용점수 40점 이상",
   gold: "캐릭터 75레벨 이상 · 리더보드 50레벨 이상 · 계좌·재화 인증 완료 · 신용점수 50점 이상",
-  platinum: "캐릭터 150레벨 이상 · 25만 벨 이상 저축 · 리더보드 85레벨 이상 · 다수의 은행 이용 · 신용점수 60점 이상",
+  platinum: "캐릭터 150레벨 이상 · 25만 벨 이상 저축 · 리더보드 85레벨 이상 · 다수의 은행 이용 · 신용점수 60점 이상 (또는 서버 인원 25명 이상인 길드장)",
   ace: "캐릭터 200레벨 이상 · 리더보드 120레벨 이상 · 신용점수 70점 이상",
   vip: "캐릭터 250레벨 이상 · 리더보드 150레벨 이상 · 신용점수 80점 이상",
 };
@@ -334,6 +335,8 @@ function helpEmbed() {
         "`/loan repay loan_id amount` 상환 · `/loan extend loan_id` 연장 · `/loan list` 조회",
         "골드부터 신용 대출(신용점수 1점당 10,000벨), 실버부터 담보 대출과 연장이 가능합니다. 관리자 승인 후 지급되며, 담보는 게임에서 확인합니다.",
         "VIP는 관리자가 설정한 추가 예금 이자를 받습니다. 등급 역할은 서버 관리자가 직접 부여하며 봇은 역할을 변경하지 않습니다.",
+        "신규 계좌 신용점수는 50점입니다. 은행 이용·규정 준수에 따른 점수는 관리자가 `/credit adjust`에서 사유를 선택해 반영합니다.",
+        "서버 인원 25명 이상(봇 제외)인 길드장은 플래티넘으로 시작하며, 동맹 길드장은 원하는 2명을 골드로 시작할 수 있습니다. 역할 부여는 관리자 담당입니다.",
         "예금·대출 이자는 매일 한국 시간 자정에 계산됩니다.",
         "",
         "**길드 가상주식**",
@@ -347,7 +350,7 @@ function helpEmbed() {
         "**관리자**",
         "`/currency create|setbase|setvalue|setrate|remove` 재화 관리",
         "`/mint` 게임 내 확인을 마친 재화 지급 · `/confiscate` 회수 (확인 버튼 필요)",
-        "`/credit set` 신용점수 · `/tier-config` 한도·이자·보관·대출기간 설정",
+        "`/credit adjust` 사유별 신용점수 조정 · `/credit set` 재량 점수 설정 · `/tier-config` 한도·이자·보관·대출기간 설정",
         "`/vault add|remove` 게임에서 확인한 보관 아이템 기록 · `/freeze`, `/unfreeze`, `/supply`",
         "`/loan queue|approve|collateral-approve|collateral-return|reject` 대출 심사",
         "`/market create|remove|issue|burn|evaluate|publish|channel|note|officer-add|officer-remove`",
@@ -527,10 +530,12 @@ async function handleTier(interaction: ChatInputCommandInteraction, tierKey: Tie
       ? `은행 아이템 보관 한도 ${storageCapacity > 0 ? `${format(storageCapacity)}개` : "미설정"}`
       : "",
     tierAtLeast(tierKey, "ace") ? "신용 대출 우선 심사" : "",
+    tierAtLeast(tierKey, "ace") ? "이벤트 우선 참여" : "",
     tierKey === "vip"
-      ? `예금 일일 이자 +${vipRate}%p`
+      ? `예금 일일 이자 추가 +${vipRate}%p (관리자 설정)`
       : "",
-    tierAtLeast(tierKey, "platinum") ? "은행 의뢰·이벤트 우대는 관리자 수동 운영" : "",
+    tierAtLeast(tierKey, "platinum") ? "은행 의뢰 가능 · 아이템 보관 한도 확대" : "",
+    tierKey === "vip" ? "추가 이권은 관리자 수동 운영" : "",
   ].filter(Boolean);
   const dueSettings =
     settings.loan_term_days > 0
@@ -547,7 +552,7 @@ async function handleTier(interaction: ChatInputCommandInteraction, tierKey: Tie
       "**적용 혜택**",
       ...benefits.map((benefit) => `• ${benefit}`),
       "",
-      "등급 역할은 봇이 부여하거나 변경하지 않습니다. 조건 확인과 역할 부여는 서버 관리자가 합니다.",
+      "동맹 길드장은 선택한 2명이 골드 등급으로 시작할 수 있습니다. 등급 역할은 봇이 부여하거나 변경하지 않습니다.",
     ].join("\n"),
   );
 }
@@ -1031,7 +1036,7 @@ async function handleCommand(interaction: ChatInputCommandInteraction) {
       await store.syncTierSnapshot(guildId, interaction.user.id, memberTier.key);
       await replyPrivate(
         interaction,
-        `계좌가 준비되었습니다. 기본재화는 ${result.currency.name}입니다. 지갑 잔액은 0입니다. 게임 내 재화를 관리자에게 인증한 뒤 관리자가 /mint로 지급합니다.`,
+        `계좌가 준비되었습니다. 기본재화는 ${result.currency.name}입니다. 지갑 잔액은 0, 신용점수는 50점으로 시작합니다. 게임 내 재화를 관리자에게 인증한 뒤 관리자가 /mint로 지급합니다.`,
       );
       break;
     }
@@ -1142,19 +1147,40 @@ async function handleCommand(interaction: ChatInputCommandInteraction) {
     case "credit": {
       requireAdmin(interaction);
       const target = interaction.options.getUser("user", true);
-      const score = interaction.options.getInteger("score", true);
-      const reason = interaction.options.getString("reason", true);
-      const change = await store.setCreditScore(
-        guildId,
-        interaction.user.id,
-        target.id,
-        score,
-        reason,
-      );
-      await replyPrivate(
-        interaction,
-        `${mention(target.id)} 신용점수를 ${change.oldScore}점에서 ${change.score}점으로 변경했습니다. 사유: ${reason}`,
-      );
+      if (interaction.options.getSubcommand() === "adjust") {
+        const adjustment = getCreditAdjustment(
+          interaction.options.getString("adjustment", true),
+        );
+        if (!adjustment) throw new Error("신용점수 변경 사유를 찾을 수 없습니다.");
+        const detail = interaction.options.getString("detail", true);
+        const reason = `${adjustment.label} · ${detail}`;
+        const change = await store.adjustCreditScore(
+          guildId,
+          interaction.user.id,
+          target.id,
+          adjustment.delta,
+          reason,
+        );
+        const actual = change.adjustment > 0 ? `+${change.adjustment}` : `${change.adjustment}`;
+        await replyPrivate(
+          interaction,
+          `${mention(target.id)} 신용점수 ${change.oldScore}점 → ${change.score}점 (${actual}점 반영). 사유: ${reason}`,
+        );
+      } else {
+        const score = interaction.options.getInteger("score", true);
+        const reason = interaction.options.getString("reason", true);
+        const change = await store.setCreditScore(
+          guildId,
+          interaction.user.id,
+          target.id,
+          score,
+          reason,
+        );
+        await replyPrivate(
+          interaction,
+          `${mention(target.id)} 신용점수를 ${change.oldScore}점에서 ${change.score}점으로 변경했습니다. 사유: ${reason}`,
+        );
+      }
       break;
     }
     case "tier-config":

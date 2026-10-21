@@ -304,6 +304,50 @@ export async function setCreditScore(
   });
 }
 
+export async function adjustCreditScore(
+  guildId: string,
+  actorDiscordUserId: string,
+  targetDiscordUserId: string,
+  adjustment: number,
+  reason: string,
+) {
+  if (!Number.isInteger(adjustment) || adjustment === 0) {
+    throw new Error("신용점수 변경값이 올바르지 않습니다.");
+  }
+  return inTransaction(async (client) => {
+    const account = await getAccount(
+      guildId,
+      targetDiscordUserId,
+      client,
+      true,
+      true,
+    );
+    const score = Math.max(0, Math.min(100, account.credit_score + adjustment));
+    await client.query(
+      `UPDATE bank_accounts SET credit_score = $1 WHERE id = $2`,
+      [score, account.id],
+    );
+    await client.query(
+      `INSERT INTO bank_credit_score_history
+         (guild_id, actor_discord_user_id, target_discord_user_id, old_score, new_score, reason)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        guildId,
+        actorDiscordUserId,
+        targetDiscordUserId,
+        account.credit_score,
+        score,
+        reason,
+      ],
+    );
+    return {
+      oldScore: account.credit_score,
+      score,
+      adjustment: score - account.credit_score,
+    };
+  });
+}
+
 export async function getTierSummary(
   guildId: string,
   discordUserId: string,

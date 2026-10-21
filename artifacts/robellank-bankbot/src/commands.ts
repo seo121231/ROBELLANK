@@ -4,6 +4,7 @@ import {
   SlashCommandStringOption,
   SlashCommandUserOption,
 } from "discord.js";
+import { CREDIT_ADJUSTMENTS } from "./credit-adjustments";
 
 const currency = (option: SlashCommandStringOption, name = "currency") =>
   option
@@ -218,11 +219,11 @@ export const commands = [
     ),
   new SlashCommandBuilder()
     .setName("credit")
-    .setDescription("관리자: 신용점수를 설정합니다")
+    .setDescription("관리자: 신용점수를 사유별로 조정하거나 직접 설정합니다")
     .addSubcommand((sub) =>
       sub
         .setName("set")
-        .setDescription("사용자 신용점수 변경 (0~100)")
+        .setDescription("관리자 재량으로 신용점수를 직접 설정합니다 (0~100)")
         .addUserOption((option) => user(option))
         .addIntegerOption((option) =>
           option
@@ -233,6 +234,31 @@ export const commands = [
             .setMaxValue(100),
         )
         .addStringOption((option) => adminReason(option)),
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("adjust")
+        .setDescription("규정에 따른 신용점수 증감 사유를 선택합니다")
+        .addUserOption((option) => user(option))
+        .addStringOption((option) =>
+          option
+            .setName("adjustment")
+            .setDescription("점수 변경 사유")
+            .setRequired(true)
+            .addChoices(
+              ...CREDIT_ADJUSTMENTS.map(({ key, label }) => ({
+                name: label,
+                value: key,
+              })),
+            ),
+        )
+        .addStringOption((option) =>
+          option
+            .setName("detail")
+            .setDescription("확인 내용 또는 추가 사유")
+            .setRequired(true)
+            .setMaxLength(500),
+        ),
     ),
   new SlashCommandBuilder()
     .setName("tier-config")

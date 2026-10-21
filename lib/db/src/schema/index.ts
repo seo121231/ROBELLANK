@@ -22,7 +22,7 @@ export const accounts = pgTable(
     discordUserId: text("discord_user_id").notNull(),
     frozen: boolean("frozen").notNull().default(false),
     tierKey: text("tier_key").notNull().default("bronze"),
-    creditScore: integer("credit_score").notNull().default(0),
+    creditScore: integer("credit_score").notNull().default(50),
     createdAt: createdAt(),
   },
   (table) => [
