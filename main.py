@@ -14,15 +14,11 @@ from zoneinfo import ZoneInfo
 import asyncpg
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import tasks
 
 
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
-if not TOKEN:
-    raise RuntimeError("DISCORD_BOT_TOKEN Secret is required.")
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL must be set.")
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("robellank-bankbot")
@@ -244,6 +240,42 @@ class BankCommandTree(app_commands.CommandTree):
             )
         return True
 
+    async def on_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ) -> None:
+        if isinstance(error, app_commands.MissingPermissions):
+            message = "이 명령어는 서버 관리자만 사용할 수 있습니다."
+        elif isinstance(error, app_commands.CheckFailure):
+            message = "이 명령어를 사용할 권한이 없습니다."
+        else:
+            logger.error(
+                "Application command failed",
+                exc_info=(type(error), error, error.__traceback__),
+            )
+            message = "명령 처리 중 오류가 발생했습니다. 관리자에게 문의하세요."
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+
+
+class BankBot(discord.Client):
+    def __init__(self) -> None:
+        super().__init__(intents=intents)
+        self.tree = BankCommandTree(self)
+
+    async def setup_hook(self) -> None:
+        global pool
+        if not TOKEN:
+            raise RuntimeError("DISCORD_BOT_TOKEN Secret is required.")
+        if not DATABASE_URL:
+            raise RuntimeError("DATABASE_URL must be set.")
+        pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=8)
+        synced = await self.tree.sync()
+        logger.info("Connected setup complete; synced %s application commands", len(synced))
+
 
 async def send_private(interaction: discord.Interaction, content: str) -> None:
     content = content if len(content) <= 1900 else content[:1880] + "\n…내용이 길어 일부를 생략했습니다."
@@ -266,15 +298,7 @@ async def safe_command(interaction: discord.Interaction, action) -> None:
 
 intents = discord.Intents.none()
 intents.guilds = True
-bot = commands.Bot(command_prefix="!", intents=intents, tree_cls=BankCommandTree)
-
-
-@bot.event
-async def setup_hook() -> None:
-    global pool
-    pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=8)
-    synced = await bot.tree.sync()
-    logger.info("Connected setup complete; synced %s application commands", len(synced))
+bot = BankBot()
 
 
 @bot.event
@@ -557,7 +581,32 @@ async def tier(interaction: discord.Interaction) -> None:
                 currency_row["id"],
             )
             credit_limit = acct["credit_score"] * 10_000 + (int(settings["platinum_loan_bonus"]) if tier_at_least(tier_key, "platinum") else 0)
-        await send_private(interaction, f"등급: **{TIER_NAME[tier_key]}** · 신용점수 {acct['credit_score']}/100\n신용대출 한도 {fmt(credit_limit)}벨 · 사용 {fmt(exposure)}벨 · 남은 한도 {fmt(max(0, credit_limit-int(exposure)))}벨\n대출/보관 혜택은 관리자 설정 및 서버 역할 기준입니다. 역할은 관리자가 직접 부여합니다.")
+            storage_limit = await conn.fetchval(
+                f"SELECT {tier_key}_storage_limit FROM bank_tier_settings WHERE guild_id=$1",
+                guild_id,
+            )
+            stored = await conn.fetchval(
+                "SELECT COALESCE(SUM(quantity),0) FROM bank_vault_items WHERE account_id=$1",
+                acct["id"],
+            )
+        benefits = {
+            "bronze": "입금·출금 가능 · 대출 신청 불가",
+            "silver": "브론즈 혜택 · 아이템/재료 담보 대출 · 대출 기간 연장",
+            "gold": "실버 혜택 · 신용점수 기반 신용 대출",
+            "platinum": "골드 혜택 · 은행 아이템 의뢰 · 대출 한도·보관 한도 추가 설정",
+            "ace": "플래티넘 혜택 · 대출 심사 우선순위 · 이벤트 우선 참여(운영진 관리)",
+            "vip": "에이스 혜택 · 예금 이자 추가율 및 추가 혜택(운영진 설정)",
+        }[tier_key]
+        vip_bonus = f"\nVIP 예금 추가 이율: {settings['vip_deposit_rate_bonus']}%/일" if tier_key == "vip" else ""
+        await send_private(
+            interaction,
+            f"등급: **{TIER_NAME[tier_key]}** · 신용점수 {acct['credit_score']}/100\n"
+            f"혜택: {benefits}\n"
+            f"신용대출 한도 {fmt(credit_limit)}벨 · 사용 {fmt(exposure)}벨 · 남은 한도 {fmt(max(0, credit_limit-int(exposure)))}벨\n"
+            f"아이템 보관함 {fmt(stored)}/{fmt(storage_limit)}개 · 신규 대출 기본 기간 {fmt(settings['loan_term_days'])}일"
+            f" · 연장 {fmt(settings['loan_extension_days'])}일/{fmt(settings['loan_extension_limit'])}회"
+            f"{vip_bonus}\n등급 역할은 관리자가 직접 부여하며 봇은 역할을 변경하지 않습니다."
+        )
 
     await safe_command(interaction, run)
 
@@ -995,12 +1044,23 @@ async def portfolio(interaction: discord.Interaction) -> None:
 async def help_command(interaction: discord.Interaction) -> None:
     embed = discord.Embed(title="ROBELLANK 은행 봇 도움말", color=0x207E66)
     embed.description = (
-        "**은행**\n/register 계좌 개설 · /balance 잔액 · /transfer 송금 · /deposit 예금 · /withdraw 출금\n"
-        "/loan 신용·담보 대출 · /credit 신용점수 관리(관리자)\n\n"
-        "**주식**\n/stock list 종목 목록 · /stock table 전체 주식 표 · /stock quote 종목 상세\n"
-        "/stock buy·sell 주문 · /stock orders 미체결 주문 · /portfolio 보유 내역\n\n"
-        "게임 재화는 사용자가 직접 등록하지 않습니다. 관리자가 게임 내 재화를 확인한 뒤 지급합니다. "
-        "등급 역할은 관리자가 직접 부여하며 봇은 역할을 변경하지 않습니다."
+        "**계좌·재화**\n"
+        "/register 계좌 개설 · /balance 잔액 · /transfer 송금 · /deposit 예금 · /withdraw 출금\n"
+        "/exchange 환전 · /history 거래 내역 · /leaderboard 재화 순위 · /currency list 재화·이율\n\n"
+        "**등급·대출**\n"
+        "/tier 등급 혜택·신용점수·한도 · /loan request 신용 대출 · /loan collateral-request 담보 대출\n"
+        "/loan list · /loan repay · /loan extend\n\n"
+        "**주식·시장**\n"
+        "/stock list 종목 목록 · /stock table 전체 종목 표 · /stock quote 이름으로 상세 조회\n"
+        "/stock buy·sell 주문 · /stock orders · /stock cancel · /portfolio 보유 내역\n"
+        "/market news 시장 공지\n\n"
+        "**관리자**\n"
+        "/mint 게임 내 재화 확인 후 지급 · /credit set·adjust 신용점수 관리\n"
+        "/loan queue·approve·reject 대출 심사 · /vault 보관 기록 · /bank-request 의뢰 관리\n"
+        "/market rumor 가짜 정보/투자 정보 유형의 미확인 찌라시 게시\n\n"
+        "찌라시는 운영진 작성 미확인 정보이며 사실 여부와 투자 결과를 보장하지 않습니다. "
+        "게임 재화는 사용자가 직접 등록하지 않으며, 관리자가 게임에서 확인한 뒤 지급합니다. "
+        "등급 역할도 관리자가 직접 부여하며 봇은 역할을 변경하지 않습니다."
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -1418,9 +1478,9 @@ async def currency_create(
     interaction: discord.Interaction,
     name: str,
     symbol: str,
-    value: app_commands.Range[float, 0.000001, 1000000] = 1,
-    deposit_rate: app_commands.Range[float, 0, 100] = 0,
-    loan_rate: app_commands.Range[float, 0, 100] = 0,
+    value: app_commands.Range[float, 0.000001, 1000000.0] = 1,
+    deposit_rate: app_commands.Range[float, 0.0, 100.0] = 0,
+    loan_rate: app_commands.Range[float, 0.0, 100.0] = 0,
 ) -> None:
     async def run():
         guild_id = require_guild(interaction)
@@ -1455,7 +1515,7 @@ async def currency_setbase(interaction: discord.Interaction, currency: str) -> N
 
 @currency_group.command(name="setvalue", description="관리자: 기본재화 기준 환전가치를 변경합니다")
 @app_commands.checks.has_permissions(administrator=True)
-async def currency_setvalue(interaction: discord.Interaction, currency: str, value: app_commands.Range[float, 0.000001, 1000000]) -> None:
+async def currency_setvalue(interaction: discord.Interaction, currency: str, value: app_commands.Range[float, 0.000001, 1000000.0]) -> None:
     async def run():
         guild_id = require_guild(interaction)
         async with pool.acquire() as conn:
@@ -1470,8 +1530,8 @@ async def currency_setvalue(interaction: discord.Interaction, currency: str, val
 async def currency_setrate(
     interaction: discord.Interaction,
     currency: str,
-    deposit_rate: app_commands.Range[float, 0, 100],
-    loan_rate: app_commands.Range[float, 0, 100],
+    deposit_rate: app_commands.Range[float, 0.0, 100.0],
+    loan_rate: app_commands.Range[float, 0.0, 100.0],
 ) -> None:
     async def run():
         guild_id = require_guild(interaction)
@@ -1485,8 +1545,9 @@ async def currency_setrate(
 @currency_group.command(name="remove", description="관리자: 재화를 비활성화합니다")
 @app_commands.checks.has_permissions(administrator=True)
 async def currency_remove(interaction: discord.Interaction, currency: str, reason: str) -> None:
-    async def run():
-        guild_id = require_guild(interaction)
+    guild_id = require_guild(interaction)
+
+    async def action():
         async with pool.acquire() as conn:
             async with conn.transaction():
                 selected = await get_currency(conn, guild_id, currency, lock=True)
@@ -1500,8 +1561,13 @@ async def currency_remove(interaction: discord.Interaction, currency: str, reaso
                 if in_use:
                     raise ValueError("잔액 또는 대출이 남아 있어 비활성화할 수 없습니다.")
                 await conn.execute("UPDATE bank_currencies SET active=false WHERE id=$1", selected["id"])
-        await send_private(interaction, f"{selected['name']} 재화를 비활성화했습니다. 사유: {reason}")
-    await safe_command(interaction, run)
+        return f"{selected['name']} 재화를 비활성화했습니다. 사유: {reason}"
+
+    await interaction.response.send_message(
+        f"{currency} 재화를 비활성화합니다. 사유: {reason}",
+        view=ConfirmActionView(interaction.user.id, action),
+        ephemeral=True,
+    )
 
 
 bot.tree.add_command(currency_group)
@@ -1705,7 +1771,7 @@ async def set_tier_setting(guild_id: str, actor_id: str, key: str, value: int | 
         async with conn.transaction():
             await conn.execute("INSERT INTO bank_tier_settings (guild_id) VALUES ($1) ON CONFLICT DO NOTHING", guild_id)
             old_value = await conn.fetchval(f"SELECT {column} FROM bank_tier_settings WHERE guild_id=$1", guild_id)
-            await conn.execute(f"UPDATE bank_tier_settings SET {column}=$1,updated_at=now() WHERE guild_id=$2", value, guild_id)
+            await conn.execute(f"UPDATE bank_tier_settings SET {column}=$1,created_at=now() WHERE guild_id=$2", value, guild_id)
             await conn.execute(
                 """INSERT INTO bank_tier_setting_history
                      (guild_id,actor_discord_user_id,setting_key,old_value,new_value,reason)
@@ -1725,7 +1791,7 @@ async def tier_limit(interaction: discord.Interaction, bonus: app_commands.Range
 
 @tier_config_group.command(name="interest", description="VIP 예금 추가 일일 이자율을 설정합니다")
 @app_commands.checks.has_permissions(administrator=True)
-async def tier_interest(interaction: discord.Interaction, rate: app_commands.Range[float, 0, 100]) -> None:
+async def tier_interest(interaction: discord.Interaction, rate: app_commands.Range[float, 0.0, 100.0]) -> None:
     async def run():
         await set_tier_setting(require_guild(interaction), str(interaction.user.id), "vip_deposit_rate_bonus", rate, "관리자 등급 혜택 설정")
         await send_private(interaction, f"VIP 예금 추가 일일 이자율을 {rate}%p로 설정했습니다.")
@@ -1783,7 +1849,7 @@ async def vault_list(interaction: discord.Interaction) -> None:
     await safe_command(interaction, run)
 
 
-async def adjust_vault(interaction: discord.Interaction, user: discord.User, item: str, quantity: int, operation: str, reason: str) -> None:
+async def adjust_vault(interaction: discord.Interaction, user: discord.User, item: str, quantity: int, operation: str, reason: str) -> str:
     guild_id = require_guild(interaction)
     item_name = unicodedata.normalize("NFKC", item.strip())
     if not item_name:
@@ -1804,7 +1870,7 @@ async def adjust_vault(interaction: discord.Interaction, user: discord.User, ite
                     """INSERT INTO bank_vault_items (account_id,item_key,item_name,quantity)
                        VALUES ($1,$2,$3,$4)
                        ON CONFLICT (account_id,item_key) DO UPDATE SET item_name=EXCLUDED.item_name,
-                         quantity=bank_vault_items.quantity+EXCLUDED.quantity,updated_at=now()""",
+                         quantity=bank_vault_items.quantity+EXCLUDED.quantity,created_at=now()""",
                     acct["id"], item_key, item_name, quantity
                 )
             else:
@@ -1814,26 +1880,36 @@ async def adjust_vault(interaction: discord.Interaction, user: discord.User, ite
                 if stored["quantity"] == quantity:
                     await conn.execute("DELETE FROM bank_vault_items WHERE id=$1", stored["id"])
                 else:
-                    await conn.execute("UPDATE bank_vault_items SET quantity=quantity-$1,updated_at=now() WHERE id=$2", quantity, stored["id"])
+                    await conn.execute("UPDATE bank_vault_items SET quantity=quantity-$1,created_at=now() WHERE id=$2", quantity, stored["id"])
             await conn.execute(
                 """INSERT INTO bank_vault_history
                      (guild_id,actor_discord_user_id,target_discord_user_id,item_name,quantity,operation,reason)
                    VALUES ($1,$2,$3,$4,$5,$6,$7)""",
                 guild_id, str(interaction.user.id), str(user.id), item_name, quantity, operation, reason
             )
-    await send_private(interaction, f"<@{user.id}> 은행 보관 아이템 {operation == 'add' and '입고' or '반환'} 기록 완료: {item_name} {fmt(quantity)}개 · 사유: {reason}")
+    return f"<@{user.id}> 은행 보관 아이템 {'입고' if operation == 'add' else '반환'} 기록 완료: {item_name} {fmt(quantity)}개 · 사유: {reason}"
 
 
 @vault_group.command(name="add", description="관리자: 게임에서 확인한 아이템을 은행에 보관합니다")
 @app_commands.checks.has_permissions(administrator=True)
 async def vault_add(interaction: discord.Interaction, user: discord.User, item: str, quantity: app_commands.Range[int, 1, 2147483647], reason: str) -> None:
-    await safe_command(interaction, lambda: adjust_vault(interaction, user, item, quantity, "add", reason))
+    async def action():
+        return await adjust_vault(interaction, user, item, quantity, "add", reason)
+    await interaction.response.send_message(
+        f"게임 내 확인된 {item} {fmt(quantity)}개를 <@{user.id}>의 은행 보관 기록에 추가합니다. 사유: {reason}",
+        view=ConfirmActionView(interaction.user.id, action), ephemeral=True
+    )
 
 
 @vault_group.command(name="remove", description="관리자: 게임에서 반환한 아이템을 기록에서 제거합니다")
 @app_commands.checks.has_permissions(administrator=True)
 async def vault_remove(interaction: discord.Interaction, user: discord.User, item: str, quantity: app_commands.Range[int, 1, 2147483647], reason: str) -> None:
-    await safe_command(interaction, lambda: adjust_vault(interaction, user, item, quantity, "remove", reason))
+    async def action():
+        return await adjust_vault(interaction, user, item, quantity, "remove", reason)
+    await interaction.response.send_message(
+        f"게임 내 반환을 확인한 {item} {fmt(quantity)}개를 <@{user.id}>의 은행 보관 기록에서 제거합니다. 사유: {reason}",
+        view=ConfirmActionView(interaction.user.id, action), ephemeral=True
+    )
 
 
 bot.tree.add_command(vault_group)
@@ -1930,23 +2006,25 @@ async def request_update(interaction: discord.Interaction, request_id: app_comma
 bot.tree.add_command(request_group)
 
 
-async def send_announcement(guild_id: str, content: str) -> None:
+async def send_announcement(guild_id: str, content: str) -> bool:
     async with pool.acquire() as conn:
         channel_id = await conn.fetchval(
             "SELECT announcement_channel_id FROM bank_guild_settings WHERE guild_id=$1",
             guild_id,
         )
     if not channel_id:
-        return
+        return False
     channel = bot.get_channel(int(channel_id))
     if channel is None:
         try:
             channel = await bot.fetch_channel(int(channel_id))
         except discord.HTTPException:
             logger.warning("Announcement channel is unavailable: %s", channel_id)
-            return
+            return False
     if isinstance(channel, discord.abc.Messageable):
-        await channel.send(content[:1900])
+        await channel.send(content[:1900], allowed_mentions=discord.AllowedMentions.none())
+        return True
+    return False
 
 
 market_group = app_commands.Group(name="market", description="관리자: 가상주식 시장·평가·상장 관리")
@@ -1965,6 +2043,59 @@ async def market_news(interaction: discord.Interaction) -> None:
             )
         text = "\n\n".join(f"**{row['stock_name']+' · ' if row['stock_name'] else ''}{row['title']}**\n{row['content']}" for row in rows) or "등록된 시장 공지가 없습니다."
         await send_private(interaction, text)
+    await safe_command(interaction, run)
+
+
+@market_group.command(name="rumor", description="관리자: 가상 시장 찌라시를 공지합니다")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.choices(kind=[
+    app_commands.Choice(name="가짜 정보", value="fake_information"),
+    app_commands.Choice(name="투자 정보", value="investment_tip"),
+])
+async def market_rumor(
+    interaction: discord.Interaction,
+    kind: app_commands.Choice[str],
+    title: str,
+    content: str,
+    stock_name: str | None = None,
+) -> None:
+    async def run():
+        guild_id = require_guild(interaction)
+        clean_title = title.strip()
+        clean_content = content.strip()
+        if not clean_title or len(clean_title) > 100:
+            raise ValueError("찌라시 제목은 1~100자로 입력하세요.")
+        if not clean_content or len(clean_content) > 1200:
+            raise ValueError("찌라시 내용은 1~1,200자로 입력하세요.")
+        stock_id = None
+        resolved_stock_name = None
+        if stock_name and stock_name.strip():
+            async with pool.acquire() as conn:
+                stock = await conn.fetchrow(
+                """SELECT id,name FROM bank_stocks
+                       WHERE guild_id=$1 AND lower(name)=lower($2) AND listed=true""",
+                    guild_id, stock_name.strip()
+                )
+            if not stock:
+                raise ValueError("해당 이름의 활성 주식을 찾을 수 없습니다.")
+            stock_id, resolved_stock_name = stock["id"], stock["name"]
+        category = "가짜 정보" if kind.value == "fake_information" else "투자 정보"
+        disclaimer = "운영진 작성 찌라시이며, 사실 여부와 투자 결과는 보장되지 않습니다."
+        posted = (
+            f"📣 **[찌라시 · {category} · 미확인] {clean_title}**\n"
+            f"{'**관련 종목:** ' + resolved_stock_name + chr(10) if resolved_stock_name else ''}"
+            f"{clean_content}\n\n*{disclaimer}*"
+        )
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO bank_market_news (guild_id,stock_id,title,content,created_by)
+                   VALUES ($1,$2,$3,$4,$5)""",
+                guild_id, stock_id, f"[찌라시 · {category}] {clean_title}", posted, str(interaction.user.id)
+            )
+        announced = await send_announcement(guild_id, posted)
+        status = "저장하고 공지 채널에 게시했습니다." if announced else "저장했습니다. 게시할 채널이 설정되지 않아 공지 채널에는 올라가지 않았습니다."
+        await send_private(interaction, status)
+
     await safe_command(interaction, run)
 
 
@@ -2081,19 +2212,25 @@ async def change_stock_supply(
 @market_group.command(name="issue", description="주식을 신규 발행하여 보유자에게 지급합니다")
 @app_commands.checks.has_permissions(administrator=True)
 async def market_issue(interaction: discord.Interaction, stock: str, holder: discord.User, shares: app_commands.Range[int, 1, 2147483647], reason: str) -> None:
-    async def run():
+    async def action():
         row = await change_stock_supply(require_guild(interaction), str(interaction.user.id), stock, str(holder.id), shares, "issue", reason)
-        await send_private(interaction, f"{row['name']} {fmt(shares)}주를 <@{holder.id}>에게 발행했습니다. 사유: {reason}")
-    await safe_command(interaction, run)
+        return f"{row['name']} {fmt(shares)}주를 <@{holder.id}>에게 발행했습니다. 사유: {reason}"
+    await interaction.response.send_message(
+        f"{stock} {fmt(shares)}주를 <@{holder.id}>에게 발행합니다. 사유: {reason}",
+        view=ConfirmActionView(interaction.user.id, action), ephemeral=True
+    )
 
 
 @market_group.command(name="burn", description="보유 주식을 소각합니다")
 @app_commands.checks.has_permissions(administrator=True)
 async def market_burn(interaction: discord.Interaction, stock: str, holder: discord.User, shares: app_commands.Range[int, 1, 2147483647], reason: str) -> None:
-    async def run():
+    async def action():
         row = await change_stock_supply(require_guild(interaction), str(interaction.user.id), stock, str(holder.id), shares, "burn", reason)
-        await send_private(interaction, f"{row['name']} <@{holder.id}> 보유분 {fmt(shares)}주를 소각했습니다. 사유: {reason}")
-    await safe_command(interaction, run)
+        return f"{row['name']} <@{holder.id}> 보유분 {fmt(shares)}주를 소각했습니다. 사유: {reason}"
+    await interaction.response.send_message(
+        f"{stock} <@{holder.id}> 보유분 {fmt(shares)}주를 소각합니다. 사유: {reason}",
+        view=ConfirmActionView(interaction.user.id, action), ephemeral=True
+    )
 
 
 @market_group.command(name="remove", description="상장을 폐지하고 미체결 주문을 취소합니다")
@@ -2304,13 +2441,8 @@ async def history(interaction: discord.Interaction) -> None:
         async with pool.acquire() as conn:
             acct = await account(conn, guild_id, str(interaction.user.id), allow_frozen=True)
             rows = await conn.fetch(
-                """SELECT t.type,t.amount,t.fee,t.description,t.created_at,c.name currency,
-                          s.name stock_name,tr.shares,tr.execution_price
+                """SELECT t.type,t.amount,t.fee,t.description,t.created_at,c.name currency
                      FROM bank_transactions t JOIN bank_currencies c ON c.id=t.currency_id
-                     LEFT JOIN bank_stock_trades tr
-                       ON (tr.buyer_account_id=t.actor_account_id OR tr.seller_account_id=t.actor_account_id)
-                      AND tr.created_at=t.created_at
-                     LEFT JOIN bank_stocks s ON s.id=tr.stock_id
                     WHERE t.guild_id=$1 AND (t.actor_account_id=$2 OR t.target_account_id=$2)
                     ORDER BY t.created_at DESC,t.id DESC LIMIT 12""",
                 guild_id, acct["id"]
@@ -2318,11 +2450,7 @@ async def history(interaction: discord.Interaction) -> None:
         lines = []
         for row in rows:
             when = int(row["created_at"].timestamp())
-            description = (
-                f"{'주식 매수' if row['type']=='stock_buy' else '주식 매도'} · {row['stock_name']} "
-                f"{fmt(row['shares'])}주 @ {fmt(row['execution_price'])}"
-                if row["stock_name"] else row["description"] or row["type"]
-            )
+            description = row["description"] or row["type"]
             fee_text = f" (수수료 {fmt(row['fee'])})" if int(row["fee"]) else ""
             lines.append(f"<t:{when}:R> · {description} · {fmt(row['amount'])} {row['currency']}{fee_text}")
         await send_private(interaction, "\n".join(lines) or "거래 내역이 없습니다.")

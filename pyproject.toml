@@ -1,7 +1,7 @@
 [project]
 name = "repl-nix-workspace"
 version = "0.1.0"
-description = "Add your description here"
+description = "ROBELLANK Discord bank and guild stock bot"
 requires-python = ">=3.13"
 dependencies = [
     "asyncpg>=0.32.0",
