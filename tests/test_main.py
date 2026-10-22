@@ -32,6 +32,34 @@ class BankBotHelpersTest(unittest.TestCase):
         self.assertIn("rumor", market_commands)
         self.assertIn("table", stock_commands)
 
+    def test_market_channel_uses_text_autocomplete_and_is_admin_only(self):
+        market_group = main.bot.tree.get_command("market")
+        channel_command = market_group.get_command("channel")
+        channel_option = next(
+            option
+            for option in channel_command.to_dict(main.bot.tree)["options"]
+            if option["name"] == "channel"
+        )
+
+        self.assertEqual(channel_option["type"], 3)
+        self.assertTrue(channel_option["autocomplete"])
+        self.assertTrue(
+            channel_command.description.startswith(main.ADMIN_DESCRIPTION_PREFIX)
+        )
+        self.assertEqual(len(channel_command.checks), 1)
+
+    def test_admin_commands_are_labeled_and_restricted_in_discord(self):
+        mint = main.bot.tree.get_command("mint")
+        credit = main.bot.tree.get_command("credit")
+        credit_adjust = credit.get_command("adjust")
+
+        self.assertTrue(mint.description.startswith(main.ADMIN_DESCRIPTION_PREFIX))
+        self.assertTrue(mint.default_permissions.administrator)
+        self.assertTrue(credit.default_permissions.administrator)
+        self.assertTrue(
+            credit_adjust.description.startswith(main.ADMIN_DESCRIPTION_PREFIX)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

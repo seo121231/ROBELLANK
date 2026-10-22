@@ -24,6 +24,47 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("robellank-bankbot")
 pool: asyncpg.Pool
 
+ADMIN_DESCRIPTION_PREFIX = "관리자 전용 · "
+ADMIN_ONLY_GROUPS = {"credit", "tier-config"}
+MIXED_GROUP_DESCRIPTIONS = {
+    "loan": "대출 신청·상환·조회 (심사 하위 명령은 관리자 전용)",
+    "currency": "재화·환율·이자 (설정 하위 명령은 관리자 전용)",
+    "vault": "은행 보관 아이템 (입고·반환은 관리자 전용)",
+    "bank-request": "은행 아이템 의뢰 (처리 하위 명령은 관리자 전용)",
+    "market": "가상주식·시장 공지 (운영 하위 명령은 관리자 전용)",
+}
+
+
+def configure_command_registry(tree: app_commands.CommandTree) -> None:
+    for command in tree.walk_commands():
+        if not getattr(command, "checks", ()):
+            continue
+
+        description = command.description
+        if description.startswith("관리자:"):
+            description = description.removeprefix("관리자:").strip()
+        if not description.startswith(ADMIN_DESCRIPTION_PREFIX):
+            max_detail_length = 100 - len(ADMIN_DESCRIPTION_PREFIX)
+            command.description = (
+                ADMIN_DESCRIPTION_PREFIX + description[:max_detail_length]
+            )
+
+        if command.parent is None:
+            app_commands.default_permissions(administrator=True)(command)
+
+    for group_name in ADMIN_ONLY_GROUPS:
+        group = tree.get_command(group_name)
+        if isinstance(group, app_commands.Group):
+            description = group.description.removeprefix("관리자:").strip()
+            group.description = ADMIN_DESCRIPTION_PREFIX + description[:85]
+            app_commands.default_permissions(administrator=True)(group)
+
+    for group_name, description in MIXED_GROUP_DESCRIPTIONS.items():
+        group = tree.get_command(group_name)
+        if isinstance(group, app_commands.Group):
+            group.description = description
+
+
 TIERS = [
     ("bronze", "브론즈", 0, "1524024521999253514"),
     ("silver", "실버", 1, "1524024634213929031"),
@@ -245,6 +286,9 @@ class BankCommandTree(app_commands.CommandTree):
             message = "이 명령어는 서버 관리자만 사용할 수 있습니다."
         elif isinstance(error, app_commands.CheckFailure):
             message = "이 명령어를 사용할 권한이 없습니다."
+        elif isinstance(error, app_commands.TransformerError):
+            logger.warning("Invalid application command input: %s", error)
+            message = "입력값 형식을 확인해 주세요. 채널은 목록에서 선택하거나 채널 이름을 입력해 주세요."
         else:
             logger.error(
                 "Application command failed",
@@ -1341,24 +1385,46 @@ async def portfolio(interaction: discord.Interaction) -> None:
 async def help_command(interaction: discord.Interaction) -> None:
     embed = discord.Embed(title="ROBELLANK 은행 봇 도움말", color=0x207E66)
     embed.description = (
-        "**계좌·재화**\n"
-        "/register 계좌 개설 · /balance 잔액 · /transfer 송금 · /deposit 예금 · /withdraw 출금\n"
-        "/exchange 환전 · /history 거래 내역 · /leaderboard 재화 순위 · /currency list 재화·이율\n\n"
-        "**등급·대출**\n"
-        "/tier 등급 혜택·신용점수·한도 · /loan request 신용 대출 · /loan collateral-request 담보 대출\n"
-        "/loan list · /loan repay · /loan extend\n\n"
-        "**주식·시장**\n"
-        "/stock list 종목 목록 · /stock table 전체 종목 표 · /stock quote 이름으로 상세 조회\n"
-        "/stock buy·sell 주문 · /stock orders · /stock cancel · /portfolio 보유 내역\n"
-        "/market news 시장 공지\n\n"
-        "**관리자**\n"
-        "/mint 게임 내 재화 확인 후 지급 · /credit set·adjust 신용점수 관리\n"
-        "/loan queue·approve·reject 대출 심사 · /vault 보관 기록 · /bank-request 의뢰 관리\n"
-        "/market rumor 가짜 정보/투자 정보 유형의 미확인 찌라시 게시\n\n"
+        "아래에서 일반 이용자 명령과 관리자 전용 명령을 구분했습니다. "
+        "`관리자 전용` 표기가 있는 명령은 서버 관리자만 사용할 수 있습니다.\n\n"
         "찌라시는 운영진 작성 미확인 정보이며 사실 여부와 투자 결과를 보장하지 않습니다. "
         "게임 재화는 사용자가 직접 등록하지 않으며, 관리자가 게임에서 확인한 뒤 지급합니다. "
         "등급 역할도 관리자가 직접 부여하며 봇은 역할을 변경하지 않습니다."
     )
+
+    leaf_commands = [
+        command
+        for command in bot.tree.walk_commands()
+        if not isinstance(command, app_commands.Group)
+    ]
+    public_commands = [command for command in leaf_commands if not command.checks]
+    admin_commands = [command for command in leaf_commands if command.checks]
+
+    def add_command_fields(title: str, commands: list[app_commands.Command]) -> None:
+        lines = [
+            f"/{command.qualified_name} — {command.description}" for command in commands
+        ]
+        chunks: list[list[str]] = []
+        current: list[str] = []
+        current_length = 0
+        for line in lines:
+            line_length = len(line) + (1 if current else 0)
+            if current and current_length + line_length > 1000:
+                chunks.append(current)
+                current = []
+                current_length = 0
+                line_length = len(line)
+            current.append(line)
+            current_length += line_length
+        if current:
+            chunks.append(current)
+
+        for index, chunk in enumerate(chunks):
+            field_name = title if index == 0 else f"{title} (계속)"
+            embed.add_field(name=field_name, value="\n".join(chunk), inline=False)
+
+    add_command_fields("일반 이용자 명령어", public_commands)
+    add_command_fields("관리자 전용 명령어", admin_commands)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -3496,22 +3562,82 @@ async def market_publish(
     await safe_command(interaction, run)
 
 
-@market_group.command(name="channel", description="시세·뉴스 공지 채널을 설정합니다")
+async def announcement_channel_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    guild = interaction.guild
+    if guild is None:
+        return []
+
+    search = current.strip().casefold().lstrip("#")
+    channels = sorted(guild.text_channels, key=lambda channel: channel.name.casefold())
+    matches = [
+        channel
+        for channel in channels
+        if not search or search in channel.name.casefold() or search in str(channel.id)
+    ]
+    return [
+        app_commands.Choice(
+            name=(
+                f"#{channel.name} · {channel.category.name}"
+                if channel.category
+                else f"#{channel.name}"
+            )[:100],
+            value=str(channel.id),
+        )
+        for channel in matches[:25]
+    ]
+
+
+def resolve_announcement_channel(
+    guild: discord.Guild, value: str
+) -> discord.TextChannel:
+    channel_input = value.strip()
+    if channel_input.startswith("<#") and channel_input.endswith(">"):
+        channel_input = channel_input[2:-1]
+
+    if channel_input.isdecimal():
+        channel = guild.get_channel(int(channel_input))
+    else:
+        channel_name = channel_input.lstrip("#").casefold()
+        channel = next(
+            (
+                candidate
+                for candidate in guild.text_channels
+                if candidate.name.casefold() == channel_name
+            ),
+            None,
+        )
+
+    if not isinstance(channel, discord.TextChannel):
+        raise ValueError(
+            "텍스트 채널을 찾지 못했습니다. 자동완성 목록에서 선택하거나 채널 이름을 확인해 주세요."
+        )
+    return channel
+
+
+@market_group.command(
+    name="channel", description="관리자 전용 · 시세·뉴스 공지 채널을 설정합니다"
+)
 @app_commands.checks.has_permissions(administrator=True)
-async def market_channel(
-    interaction: discord.Interaction, channel: discord.TextChannel
-) -> None:
+@app_commands.autocomplete(channel=announcement_channel_autocomplete)
+async def market_channel(interaction: discord.Interaction, channel: str) -> None:
     async def run():
+        guild = interaction.guild
+        if guild is None:
+            raise ValueError("서버에서만 공지 채널을 설정할 수 있습니다.")
         guild_id = require_guild(interaction)
+        target_channel = resolve_announcement_channel(guild, channel)
         async with pool.acquire() as conn:
             await conn.execute(
                 """INSERT INTO bank_guild_settings (guild_id,announcement_channel_id)
                    VALUES ($1,$2) ON CONFLICT (guild_id) DO UPDATE SET announcement_channel_id=EXCLUDED.announcement_channel_id""",
                 guild_id,
-                str(channel.id),
+                str(target_channel.id),
             )
         await send_private(
-            interaction, f"시세·뉴스 공지 채널을 {channel.mention}로 설정했습니다."
+            interaction,
+            f"시세·뉴스 공지 채널을 {target_channel.mention}로 설정했습니다.",
         )
 
     await safe_command(interaction, run)
@@ -3802,6 +3928,9 @@ async def scheduled_tasks() -> None:
 @scheduled_tasks.before_loop
 async def before_scheduled_tasks() -> None:
     await bot.wait_until_ready()
+
+
+configure_command_registry(bot.tree)
 
 
 async def main() -> None:
