@@ -23,7 +23,10 @@ class BankBotHelpersTest(unittest.TestCase):
             main.evaluation_change_range(51)
 
     def test_slash_command_groups_include_stock_table_and_admin_rumor(self):
-        commands = {command.name: command.to_dict(main.bot.tree) for command in main.bot.tree.get_commands()}
+        commands = {
+            command.name: command.to_dict(main.bot.tree)
+            for command in main.bot.tree.get_commands()
+        }
         market_commands = {option["name"] for option in commands["market"]["options"]}
         stock_commands = {option["name"] for option in commands["stock"]["options"]}
         self.assertIn("rumor", market_commands)

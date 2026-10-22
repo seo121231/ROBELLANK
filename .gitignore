@@ -52,3 +52,4 @@ Thumbs.db
 __pycache__/
 *.py[cod]
 .uv_cache/
+.ruff_cache/
