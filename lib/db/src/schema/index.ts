@@ -508,6 +508,12 @@ export const guildSettings = pgTable("bank_guild_settings", {
   announcementChannelId: text("announcement_channel_id"),
 });
 
+export const userPreferences = pgTable("bank_user_preferences", {
+  discordUserId: text("discord_user_id").primaryKey(),
+  language: text("language").notNull().default("ko"),
+  createdAt: createdAt(),
+});
+
 export const marketCycles = pgTable(
   "bank_market_cycles",
   {

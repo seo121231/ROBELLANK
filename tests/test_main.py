@@ -1,10 +1,46 @@
 import unittest
+import ast
+from pathlib import Path
 from unittest.mock import patch
 
 import main
+from localization import translate_message
 
 
-class BankBotHelpersTest(unittest.TestCase):
+class FakeConnection:
+    def __init__(self):
+        self.language = None
+        self.execute_args = None
+
+    async def fetchval(self, query, user_id):
+        self.fetch_user_id = user_id
+        return self.language
+
+    async def execute(self, query, user_id, language):
+        self.execute_args = (user_id, language)
+        self.language = language
+
+
+class FakeAcquire:
+    def __init__(self, connection):
+        self.connection = connection
+
+    async def __aenter__(self):
+        return self.connection
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+
+class FakePool:
+    def __init__(self):
+        self.connection = FakeConnection()
+
+    def acquire(self):
+        return FakeAcquire(self.connection)
+
+
+class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
     def test_normalizes_stock_names_without_tickers(self):
         self.assertEqual(main.normalize_name("  Café   Market "), "café   market")
 
@@ -56,6 +92,107 @@ class BankBotHelpersTest(unittest.TestCase):
         stock_commands = {option["name"] for option in commands["stock"]["options"]}
         self.assertIn("rumor", market_commands)
         self.assertIn("table", stock_commands)
+
+    def test_language_and_menu_commands_are_registered(self):
+        language = main.bot.tree.get_command("language")
+        menu = main.bot.tree.get_command("menu")
+
+        self.assertIsNotNone(language)
+        self.assertIsNotNone(menu)
+        language_option = language.to_dict(main.bot.tree)["options"][0]
+        self.assertEqual(
+            {choice["value"] for choice in language_option["choices"]},
+            {"ko", "en"},
+        )
+
+    def test_menu_has_public_navigation_and_language_buttons(self):
+        view = main.BankMenuView(123456, "en")
+
+        self.assertEqual(
+            [button.label for button in view.children],
+            ["Menu", "Help", "Stocks", "Language: English"],
+        )
+
+    def test_english_market_report_translates_system_generated_evidence(self):
+        message = (
+            "오늘 가상주식 시세 발표\n"
+            "**종목 A** · 1,000 → 1,100 (+10%) · 점수 미등록 · 무작위 변동\n"
+            "점수 미등록 종목에 하루 -10%~+10% 무작위 변동을 적용했습니다."
+        )
+
+        translated = translate_message(message, "en")
+
+        self.assertIn("Today's virtual stock prices", translated)
+        self.assertIn("Unscored · random movement", translated)
+        self.assertIn("A random daily price movement of -10% to +10%", translated)
+
+    def test_single_row_account_summaries_translate_without_newlines(self):
+        loan = translate_message(
+            "#12 신용 · 원금 100 · 남은 원리금 105 · 일 1% · pending",
+            "en",
+        )
+        currency = translate_message(
+            "**벨** (BELL) · 환전가치 1 · 기본재화 · 일 예금 0% · 일 대출 0%",
+            "en",
+        )
+
+        self.assertIn("Credit · principal 100 · remaining balance 105", loan)
+        self.assertIn("exchange value 1 · base currency · daily deposit 0%", currency)
+
+    def test_english_admin_confirmation_results_preserve_reason_and_amount(self):
+        result = translate_message(
+            "지급 완료: <@123456> · 1,000 BELL · 사유: verified",
+            "en",
+        )
+
+        self.assertEqual(
+            result,
+            "Granted 1,000 BELL for <@123456>. Reason: verified",
+        )
+
+    def test_language_setting_translates_known_messages_and_keeps_korean(self):
+        original = "계좌가 없습니다. 먼저 /register를 사용하세요."
+        self.assertEqual(
+            translate_message(original, "en"),
+            "You do not have an account. Run /register first.",
+        )
+        self.assertEqual(translate_message(original, "ko"), original)
+
+    def test_unknown_english_response_is_not_silently_left_in_korean(self):
+        translated = translate_message("이 문구에는 아직 번역이 없습니다.", "en")
+        self.assertTrue(translated.startswith("English translation unavailable"))
+        self.assertIn("이 문구에는 아직 번역이 없습니다.", translated)
+
+    async def test_language_preference_is_saved_per_discord_user(self):
+        pool = FakePool()
+
+        with patch.object(main, "pool", pool, create=True):
+            await main.set_user_language(123456, "en")
+            language = await main.get_user_language(123456)
+
+        self.assertEqual(language, "en")
+        self.assertEqual(pool.connection.execute_args, ("123456", "en"))
+        self.assertEqual(pool.connection.fetch_user_id, "123456")
+
+    def test_bot_does_not_send_ephemeral_interaction_messages(self):
+        source = ast.parse(Path(main.__file__).read_text())
+        ephemeral_true_calls = []
+        for node in ast.walk(source):
+            if not isinstance(node, ast.Call):
+                continue
+            if not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr not in {"send_message", "send"}:
+                continue
+            for keyword in node.keywords:
+                if (
+                    keyword.arg == "ephemeral"
+                    and isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value is True
+                ):
+                    ephemeral_true_calls.append(node.lineno)
+
+        self.assertEqual(ephemeral_true_calls, [])
 
     def test_market_channel_uses_text_autocomplete_and_is_admin_only(self):
         market_group = main.bot.tree.get_command("market")

@@ -16,6 +16,8 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 
+from localization import SUPPORTED_LANGUAGES, translate_known_text, translate_message
+
 
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -295,10 +297,7 @@ class BankCommandTree(app_commands.CommandTree):
                 exc_info=(type(error), error, error.__traceback__),
             )
             message = "명령 처리 중 오류가 발생했습니다. 관리자에게 문의하세요."
-        if interaction.response.is_done():
-            await interaction.followup.send(message, ephemeral=True)
-        else:
-            await interaction.response.send_message(message, ephemeral=True)
+        await send_public(interaction, message)
 
 
 class BankBot(discord.Client):
@@ -320,23 +319,92 @@ class BankBot(discord.Client):
 
 
 async def send_private(interaction: discord.Interaction, content: str) -> None:
-    content = (
-        content
-        if len(content) <= 1900
-        else content[:1880] + "\n…내용이 길어 일부를 생략했습니다."
-    )
+    """Legacy name retained for existing commands; replies are public."""
+    await send_public(interaction, content)
+
+
+async def get_user_language(user_id: str | int) -> str:
+    try:
+        async with pool.acquire() as conn:
+            language = await conn.fetchval(
+                "SELECT language FROM bank_user_preferences WHERE discord_user_id=$1",
+                str(user_id),
+            )
+    except asyncpg.PostgresError:
+        logger.warning("Could not load user language preference", exc_info=True)
+        return "ko"
+    return language if language in SUPPORTED_LANGUAGES else "ko"
+
+
+async def set_user_language(user_id: str | int, language: str) -> None:
+    if language not in SUPPORTED_LANGUAGES:
+        raise ValueError("Unsupported language.")
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO bank_user_preferences (discord_user_id,language)
+               VALUES ($1,$2)
+               ON CONFLICT (discord_user_id)
+               DO UPDATE SET language=EXCLUDED.language""",
+            str(user_id),
+            language,
+        )
+
+
+def localize_embed(embed: discord.Embed, language: str) -> discord.Embed:
+    localized = discord.Embed.from_dict(embed.to_dict())
+    if localized.title:
+        localized.title = translate_known_text(localized.title, language)
+    if localized.description:
+        localized.description = translate_known_text(localized.description, language)
+    for field in localized.fields:
+        field.name = translate_known_text(field.name, language)
+        field.value = translate_known_text(field.value, language)
+    if localized.footer.text:
+        localized.set_footer(
+            text=translate_known_text(localized.footer.text, language),
+            icon_url=localized.footer.icon_url,
+        )
+    return localized
+
+
+async def send_public(
+    interaction: discord.Interaction,
+    content: str | None = None,
+    *,
+    embed: discord.Embed | None = None,
+    view: discord.ui.View | None = None,
+    language: str | None = None,
+) -> None:
+    language = language or await get_user_language(interaction.user.id)
+    if content is not None:
+        content = translate_message(content, language)
+        if len(content) > 1900:
+            omitted = "…some content was omitted." if language == "en" else "…내용이 길어 일부를 생략했습니다."
+            content = content[:1880] + "\n" + omitted
+    if embed is not None:
+        embed = localize_embed(embed, language)
     if interaction.response.is_done():
-        await interaction.followup.send(content, ephemeral=True)
+        await interaction.followup.send(
+            content=content, embed=embed, view=view, ephemeral=False
+        )
     else:
-        await interaction.response.send_message(content, ephemeral=True)
+        await interaction.response.send_message(
+            content=content, embed=embed, view=view, ephemeral=False
+        )
 
 
 async def safe_command(interaction: discord.Interaction, action) -> None:
     try:
         await action()
-    except (ValueError, asyncpg.PostgresError) as error:
+    except ValueError as error:
         logger.warning("Command failed: %s", error)
         await send_private(interaction, str(error) or "요청을 처리하지 못했습니다.")
+    except asyncpg.PostgresError:
+        logger.exception("Database command failed")
+        await send_private(
+            interaction,
+            "데이터베이스 문제로 요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+        )
     except Exception:
         logger.exception("Unexpected command failure")
         await send_private(
@@ -855,7 +923,7 @@ async def stock_list(interaction: discord.Interaction) -> None:
             if len(rows) <= 24
             else f"총 {len(rows)}종목 · 목록에는 이름순 24종목 표시"
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await send_public(interaction, embed=embed)
 
     await safe_command(interaction, run)
 
@@ -870,12 +938,14 @@ async def stock_table(interaction: discord.Interaction) -> None:
         pages = (len(rows) + 11) // 12
         for page in range(pages):
             if page == 0:
-                await interaction.response.send_message(
-                    embed=table_embed(rows, page), ephemeral=True
-                )
+                await send_public(interaction, embed=table_embed(rows, page))
             else:
                 await interaction.followup.send(
-                    embed=table_embed(rows, page), ephemeral=True
+                    embed=localize_embed(
+                        table_embed(rows, page),
+                        await get_user_language(interaction.user.id),
+                    ),
+                    ephemeral=False,
                 )
 
     await safe_command(interaction, run)
@@ -1000,7 +1070,7 @@ async def stock_quote(interaction: discord.Interaction, stock: str) -> None:
             or "아직 체결된 거래가 없습니다.",
             inline=False,
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await send_public(interaction, embed=embed)
 
     await safe_command(interaction, run)
 
@@ -1384,22 +1454,40 @@ async def portfolio(interaction: discord.Interaction) -> None:
             if len(rows) <= 24
             else f"총 {len(rows)}종목 · 이름순 24종목 표시"
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await send_public(interaction, embed=embed)
 
     await safe_command(interaction, run)
 
 
 @bot.tree.command(name="help", description="은행 봇 사용법과 전체 명령어를 확인합니다")
 async def help_command(interaction: discord.Interaction) -> None:
-    embed = discord.Embed(title="ROBELLANK 은행 봇 도움말", color=0x207E66)
+    language = await get_user_language(interaction.user.id)
+    await send_public(
+        interaction,
+        embed=build_help_embed(language),
+        view=BankMenuView(interaction.user.id, language),
+        language=language,
+    )
+
+
+def build_help_embed(language: str) -> discord.Embed:
+    english = language == "en"
+    embed = discord.Embed(
+        title="ROBELLANK Bank Bot Help" if english else "ROBELLANK 은행 봇 도움말",
+        color=0x207E66,
+    )
     embed.description = (
-        "아래에서 일반 이용자 명령과 관리자 전용 명령을 구분했습니다. "
+        "Commands are grouped into user and administrator sections below. "
+        "Administrator-only commands require server administrator permissions.\n\n"
+        "Rumors are unverified posts written by server staff. Game currency and tier roles "
+        "are verified and managed by administrators."
+        if english
+        else "아래에서 일반 이용자 명령과 관리자 전용 명령을 구분했습니다. "
         "`관리자 전용` 표기가 있는 명령은 서버 관리자만 사용할 수 있습니다.\n\n"
         "찌라시는 운영진 작성 미확인 정보이며 사실 여부와 투자 결과를 보장하지 않습니다. "
         "게임 재화는 사용자가 직접 등록하지 않으며, 관리자가 게임에서 확인한 뒤 지급합니다. "
         "등급 역할도 관리자가 직접 부여하며 봇은 역할을 변경하지 않습니다."
     )
-
     leaf_commands = [
         command
         for command in bot.tree.walk_commands()
@@ -1410,7 +1498,9 @@ async def help_command(interaction: discord.Interaction) -> None:
 
     def add_command_fields(title: str, commands: list[app_commands.Command]) -> None:
         lines = [
-            f"/{command.qualified_name} — {command.description}" for command in commands
+            f"/{command.qualified_name} — "
+            f"{translate_known_text(command.description, language)}"
+            for command in commands
         ]
         chunks: list[list[str]] = []
         current: list[str] = []
@@ -1428,12 +1518,179 @@ async def help_command(interaction: discord.Interaction) -> None:
             chunks.append(current)
 
         for index, chunk in enumerate(chunks):
-            field_name = title if index == 0 else f"{title} (계속)"
+            field_name = title if index == 0 else f"{title} (continued)"
             embed.add_field(name=field_name, value="\n".join(chunk), inline=False)
 
-    add_command_fields("일반 이용자 명령어", public_commands)
-    add_command_fields("관리자 전용 명령어", admin_commands)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    add_command_fields(
+        "User commands" if english else "일반 이용자 명령어", public_commands
+    )
+    add_command_fields(
+        "Administrator commands" if english else "관리자 전용 명령어",
+        admin_commands,
+    )
+    return embed
+
+
+def build_main_menu_embed(language: str) -> discord.Embed:
+    if language == "en":
+        return discord.Embed(
+            title="ROBELLANK Bank",
+            description=(
+                "Use the buttons below to open help, browse listed stocks, or switch "
+                "your language. Your language choice is saved to your Discord account."
+            ),
+            color=0x207E66,
+        )
+    return discord.Embed(
+        title="ROBELLANK 은행",
+        description=(
+            "아래 버튼으로 도움말을 열고, 상장 종목을 보거나, 표시 언어를 바꿀 수 있습니다. "
+            "언어 설정은 디스코드 사용자별로 저장됩니다."
+        ),
+        color=0x207E66,
+    )
+
+
+def build_stock_list_embed(
+    rows: list[asyncpg.Record], language: str
+) -> discord.Embed:
+    english = language == "en"
+    embed = discord.Embed(
+        title="Guild stocks" if english else "길드 가상주식",
+        description=(
+            "Reference prices are informational; trades execute at matched order prices."
+            if english
+            else "기준가는 참고 가격이며 실제 체결가는 주문 매칭 결과에 따릅니다."
+        ),
+        color=0x207E66,
+    )
+    if not rows:
+        embed.description = (
+            "There are no listed stocks." if english else "상장 종목이 없습니다."
+        )
+    for stock in rows[:24]:
+        change = (
+            "Not evaluated"
+            if stock["change_percent"] is None and english
+            else "평가 전"
+            if stock["change_percent"] is None
+            else f"{signed(stock['change_percent'])}%"
+        )
+        embed.add_field(
+            name=stock["name"],
+            value=(
+                f"Reference price **{fmt(stock['current_price'])}** · daily {change}\n"
+                f"{fmt(stock['total_shares'])} shares · Market cap {fmt(stock['market_cap'])}"
+                if english
+                else f"기준가 **{fmt(stock['current_price'])}** · 일간 {change}\n"
+                f"유통 {fmt(stock['total_shares'])}주 · 시가총액 {fmt(stock['market_cap'])}"
+            ),
+            inline=False,
+        )
+    if english:
+        embed.set_footer(text=f"{len(rows)} listed stocks")
+    else:
+        embed.set_footer(text=f"총 {len(rows)}종목 · 자세한 내용은 /stock quote")
+    return embed
+
+
+class BankMenuView(discord.ui.View):
+    def __init__(self, owner_id: int, language: str):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        labels = (
+            [
+                ("menu", "Menu", discord.ButtonStyle.secondary),
+                ("help", "Help", discord.ButtonStyle.primary),
+                ("stocks", "Stocks", discord.ButtonStyle.primary),
+                ("language", "Language: English", discord.ButtonStyle.success),
+            ]
+            if language == "en"
+            else [
+                ("menu", "메뉴", discord.ButtonStyle.secondary),
+                ("help", "도움말", discord.ButtonStyle.primary),
+                ("stocks", "주식 목록", discord.ButtonStyle.primary),
+                ("language", "언어: 한국어", discord.ButtonStyle.success),
+            ]
+        )
+        for action, label, style in labels:
+            button = discord.ui.Button(
+                label=label, style=style, custom_id=f"robellank-menu:{action}"
+            )
+
+            async def callback(
+                interaction: discord.Interaction, selected_action: str = action
+            ) -> None:
+                await self.handle_action(interaction, selected_action)
+
+            button.callback = callback
+            self.add_item(button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await send_public(
+                interaction,
+                "이 메뉴는 명령을 실행한 사용자만 사용할 수 있습니다.",
+            )
+            return False
+        return True
+
+    async def handle_action(
+        self, interaction: discord.Interaction, action: str
+    ) -> None:
+        try:
+            language = await get_user_language(interaction.user.id)
+            if action == "language":
+                language = "en" if language == "ko" else "ko"
+                await set_user_language(interaction.user.id, language)
+                embed = build_main_menu_embed(language)
+            elif action == "help":
+                embed = build_help_embed(language)
+            elif action == "stocks":
+                rows = await list_stocks(require_guild(interaction))
+                embed = build_stock_list_embed(rows, language)
+            else:
+                embed = build_main_menu_embed(language)
+            await interaction.response.edit_message(
+                embed=localize_embed(embed, language),
+                view=BankMenuView(interaction.user.id, language),
+            )
+        except Exception:
+            logger.exception("Bank menu action failed")
+            await send_public(
+                interaction,
+                "메뉴를 열지 못했습니다. 다시 시도하거나 관리자에게 문의하세요.",
+            )
+
+
+@bot.tree.command(name="menu", description="은행 메뉴와 주식 목록을 엽니다")
+async def menu_command(interaction: discord.Interaction) -> None:
+    language = await get_user_language(interaction.user.id)
+    await send_public(
+        interaction,
+        embed=build_main_menu_embed(language),
+        view=BankMenuView(interaction.user.id, language),
+        language=language,
+    )
+
+
+@bot.tree.command(name="language", description="봇 응답 언어를 한국어 또는 English로 설정합니다")
+@app_commands.choices(
+    language=[
+        app_commands.Choice(name="한국어", value="ko"),
+        app_commands.Choice(name="English", value="en"),
+    ]
+)
+async def language_command(
+    interaction: discord.Interaction, language: app_commands.Choice[str]
+) -> None:
+    await set_user_language(interaction.user.id, language.value)
+    confirmation = (
+        "Your bot language is now English."
+        if language.value == "en"
+        else "봇 응답 언어를 한국어로 설정했습니다."
+    )
+    await send_public(interaction, confirmation, language=language.value)
 
 
 loan_group = app_commands.Group(name="loan", description="대출 신청·상환·조회")
@@ -2249,10 +2506,10 @@ async def currency_remove(
                 )
         return f"{selected['name']} 재화를 비활성화했습니다. 사유: {reason}"
 
-    await interaction.response.send_message(
+    await send_public(
+        interaction,
         f"{currency} 재화를 비활성화합니다. 사유: {reason}",
         view=ConfirmActionView(interaction.user.id, action),
-        ephemeral=True,
     )
 
 
@@ -2267,26 +2524,34 @@ class ConfirmActionView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.actor_id:
-            await interaction.response.send_message(
-                "이 확인 버튼은 요청한 관리자만 사용할 수 있습니다.", ephemeral=True
+            await send_public(
+                interaction, "이 확인 버튼은 요청한 관리자만 사용할 수 있습니다."
             )
             return False
         return True
 
-    @discord.ui.button(label="확인", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="확인 / Confirm", style=discord.ButtonStyle.success)
     async def confirm(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
         try:
             result = await self.action()
-            await interaction.response.edit_message(content=result, view=None)
-        except Exception as error:
-            logger.exception("Confirmed action failed")
+            language = await get_user_language(interaction.user.id)
             await interaction.response.edit_message(
-                content=f"처리하지 못했습니다: {error}", view=None
+                content=translate_message(result, language), view=None
+            )
+        except Exception:
+            logger.exception("Confirmed action failed")
+            language = await get_user_language(interaction.user.id)
+            await interaction.response.edit_message(
+                content=translate_message(
+                    "작업을 완료하지 못했습니다. 관리자에게 문의하세요.",
+                    language,
+                ),
+                view=None,
             )
 
-    @discord.ui.button(label="취소", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="취소 / Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
@@ -2368,11 +2633,11 @@ async def request_money_change(
         )
         return f"{'지급' if operation == 'mint' else '회수'} 완료: <@{user.id}> · {fmt(amount)} {currency_row['symbol']} · 사유: {reason}"
 
-    await interaction.response.send_message(
+    await send_public(
+        interaction,
         f"<@{user.id}>에게 {fmt(amount)} {currency}를 "
         f"{'지급' if operation == 'mint' else '회수'}합니다. 사유: {reason}",
         view=ConfirmActionView(interaction.user.id, action),
-        ephemeral=True,
     )
 
 
@@ -2827,10 +3092,10 @@ async def vault_add(
     async def action():
         return await adjust_vault(interaction, user, item, quantity, "add", reason)
 
-    await interaction.response.send_message(
+    await send_public(
+        interaction,
         f"게임 내 확인된 {item} {fmt(quantity)}개를 <@{user.id}>의 은행 보관 기록에 추가합니다. 사유: {reason}",
         view=ConfirmActionView(interaction.user.id, action),
-        ephemeral=True,
     )
 
 
@@ -2848,10 +3113,10 @@ async def vault_remove(
     async def action():
         return await adjust_vault(interaction, user, item, quantity, "remove", reason)
 
-    await interaction.response.send_message(
+    await send_public(
+        interaction,
         f"게임 내 반환을 확인한 {item} {fmt(quantity)}개를 <@{user.id}>의 은행 보관 기록에서 제거합니다. 사유: {reason}",
         view=ConfirmActionView(interaction.user.id, action),
-        ephemeral=True,
     )
 
 
@@ -3323,10 +3588,10 @@ async def market_issue(
         )
         return f"{row['name']} {fmt(shares)}주를 <@{holder.id}>에게 발행했습니다. 사유: {reason}"
 
-    await interaction.response.send_message(
+    await send_public(
+        interaction,
         f"{stock} {fmt(shares)}주를 <@{holder.id}>에게 발행합니다. 사유: {reason}",
         view=ConfirmActionView(interaction.user.id, action),
-        ephemeral=True,
     )
 
 
@@ -3351,10 +3616,10 @@ async def market_burn(
         )
         return f"{row['name']} <@{holder.id}> 보유분 {fmt(shares)}주를 소각했습니다. 사유: {reason}"
 
-    await interaction.response.send_message(
+    await send_public(
+        interaction,
         f"{stock} <@{holder.id}> 보유분 {fmt(shares)}주를 소각합니다. 사유: {reason}",
         view=ConfirmActionView(interaction.user.id, action),
-        ephemeral=True,
     )
 
 
@@ -3391,10 +3656,10 @@ async def market_remove(
                 )
         return f"{row['name']} 상장을 폐지하고 미체결 주문을 취소했습니다. 보유 주식과 기록은 보존됩니다."
 
-    await interaction.response.send_message(
+    await send_public(
+        interaction,
         f"{stock} 상장을 폐지하고 미체결 주문을 취소합니다. 사유: {reason}",
         view=ConfirmActionView(interaction.user.id, action),
-        ephemeral=True,
     )
 
 
