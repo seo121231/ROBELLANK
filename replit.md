@@ -39,7 +39,7 @@ Discord 서버에서 가상 통화·계좌와 길드 가상주식 시장을 운�
 ## Product
 
 - Server-scoped bank accounts, wallet/deposit balances, transfers, currency exchange, daily interest, approval-based loans, and transaction history.
-- Guild stock listings tracked by name, detailed issuer descriptions and quotes, user-to-user limit orders, portfolios, 7.5% sell fees, daily score-based price changes, and market announcements.
+- Guild stock listings tracked by name, detailed issuer descriptions and quotes, user-to-user limit orders, portfolios, 7.5% sell fees, daily score-based price changes, and -10%~+10% random changes for stocks without an evaluation.
 - Administrator controls for currencies, account freezes, money supply, loans, listings, share issuance, scoring, and announcements.
 
 ## User preferences

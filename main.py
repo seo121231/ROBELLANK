@@ -904,7 +904,7 @@ async def stock_quote(interaction: discord.Interaction, stock: str) -> None:
                 """SELECT evaluation_date,content_score,activity_score,membership_score,
                           events_score,growth_score,influence_score,opinion_score,
                           base_score,random_score,final_score,change_percent,
-                          old_price,new_price,evidence
+                          old_price,new_price,evidence,created_by
                      FROM bank_stock_evaluations WHERE stock_id=$1 AND status='published'
                     ORDER BY evaluation_date DESC LIMIT 1""",
                 row["id"],
@@ -937,18 +937,26 @@ async def stock_quote(interaction: discord.Interaction, stock: str) -> None:
                 row["id"],
             )
         if evaluation:
-            eval_text = (
-                f"평가일 {evaluation['evaluation_date']}\n기본 {signed(evaluation['base_score'])}점 + 무작위 {signed(evaluation['random_score'])}점 = **{signed(evaluation['final_score'])}점**\n"
-                f"콘텐츠 {signed(evaluation['content_score'])}/6 · "
-                f"활동 {signed(evaluation['activity_score'])}/6 · "
-                f"인원 {signed(evaluation['membership_score'])}/5\n"
-                f"사건 {signed(evaluation['events_score'])}/8 · "
-                f"성장 {signed(evaluation['growth_score'])}/5 · "
-                f"영향력 {signed(evaluation['influence_score'])}/5 · "
-                f"여론 {signed(evaluation['opinion_score'])}/5\n"
-                f"가격 {fmt(evaluation['old_price'])} → {fmt(evaluation['new_price'])} "
-                f"({signed(evaluation['change_percent'])}%)"
-            )
+            if is_unscored_market_evaluation(evaluation):
+                eval_text = (
+                    f"평가일 {evaluation['evaluation_date']}\n"
+                    f"점수 미등록 · 무작위 변동 {signed(evaluation['change_percent'])}% "
+                    "(하루 -10%~+10%)\n"
+                    f"가격 {fmt(evaluation['old_price'])} → {fmt(evaluation['new_price'])}"
+                )
+            else:
+                eval_text = (
+                    f"평가일 {evaluation['evaluation_date']}\n기본 {signed(evaluation['base_score'])}점 + 무작위 {signed(evaluation['random_score'])}점 = **{signed(evaluation['final_score'])}점**\n"
+                    f"콘텐츠 {signed(evaluation['content_score'])}/6 · "
+                    f"활동 {signed(evaluation['activity_score'])}/6 · "
+                    f"인원 {signed(evaluation['membership_score'])}/5\n"
+                    f"사건 {signed(evaluation['events_score'])}/8 · "
+                    f"성장 {signed(evaluation['growth_score'])}/5 · "
+                    f"영향력 {signed(evaluation['influence_score'])}/5 · "
+                    f"여론 {signed(evaluation['opinion_score'])}/5\n"
+                    f"가격 {fmt(evaluation['old_price'])} → {fmt(evaluation['new_price'])} "
+                    f"({signed(evaluation['change_percent'])}%)"
+                )
         else:
             eval_text = "아직 공개된 평가가 없습니다."
         embed = discord.Embed(
@@ -3412,6 +3420,95 @@ def evaluation_change_range(score: int) -> tuple[int, int]:
     return min(values), max(values)
 
 
+UNSCORED_MARKET_EVIDENCE = "관리자 평가 미등록 — 무작위 시세 변동"
+
+
+def unscored_market_change() -> int:
+    return random.randint(-10, 10)
+
+
+def market_price_after_change(price: int, change: int) -> int:
+    return max(1, math.floor(price * (1 + change / 100) + 0.5))
+
+
+def is_unscored_market_evaluation(row: asyncpg.Record) -> bool:
+    return (
+        row["created_by"] == "system"
+        and row["evidence"] == UNSCORED_MARKET_EVIDENCE
+    )
+
+
+def market_report_line(row: asyncpg.Record) -> str:
+    score_label = (
+        "점수 미등록 · 무작위 변동"
+        if is_unscored_market_evaluation(row)
+        else f"평가 {signed(row['final_score'])}점"
+    )
+    return (
+        f"**{row['name']}** · {fmt(row['old_price'])} → {fmt(row['new_price'])} "
+        f"({signed(row['change_percent'])}%) · {score_label}\n{row['evidence']}"
+    )
+
+
+async def ensure_unscored_market_evaluations(
+    conn: asyncpg.Connection,
+    guild_id: str,
+    date: str,
+    stock_name: str | None = None,
+) -> None:
+    stocks = await conn.fetch(
+        """SELECT s.id,s.current_price
+             FROM bank_stocks s
+            WHERE s.guild_id=$1 AND s.listed=true
+              AND NOT EXISTS (
+                SELECT 1 FROM bank_stock_evaluations e
+                 WHERE e.stock_id=s.id AND e.evaluation_date=$2
+              )
+              AND ($3::text IS NULL OR lower(trim(s.name))=lower(trim($3)))
+            ORDER BY lower(s.name),s.name
+            FOR UPDATE OF s""",
+        guild_id,
+        date,
+        stock_name,
+    )
+    for stock in stocks:
+        change = unscored_market_change()
+        new_price = market_price_after_change(stock["current_price"], change)
+        await conn.execute(
+            """INSERT INTO bank_stock_evaluations
+                 (guild_id,stock_id,evaluation_date,content_score,activity_score,
+                  membership_score,events_score,growth_score,influence_score,
+                  opinion_score,base_score,random_score,final_score,change_percent,
+                  old_price,new_price,evidence,status,created_by)
+               VALUES ($1,$2,$3,0,0,0,0,0,0,0,0,0,0,$4,$5,$6,$7,'pending','system')
+               ON CONFLICT (stock_id,evaluation_date) DO NOTHING""",
+            guild_id,
+            stock["id"],
+            date,
+            change,
+            stock["current_price"],
+            new_price,
+            UNSCORED_MARKET_EVIDENCE,
+        )
+
+
+def market_news_content(row: asyncpg.Record) -> str:
+    price_line = (
+        f"기준가 {fmt(row['old_price'])} → {fmt(row['new_price'])} "
+        f"({signed(row['change_percent'])}%)"
+    )
+    if is_unscored_market_evaluation(row):
+        return f"{price_line}\n점수 미등록 종목에 하루 -10%~+10% 무작위 변동을 적용했습니다."
+    return (
+        f"{price_line}\n"
+        f"평가 {signed(row['final_score'])}점 (콘텐츠 {signed(row['content_score'])}, "
+        f"활동 {signed(row['activity_score'])}, 인원 {signed(row['membership_score'])}, "
+        f"사건 {signed(row['events_score'])}, 성장 {signed(row['growth_score'])}, "
+        f"영향력 {signed(row['influence_score'])}, 여론 {signed(row['opinion_score'])})\n"
+        f"근거: {row['evidence']}"
+    )
+
+
 @market_group.command(
     name="evaluate", description="종목의 세부 평가 점수와 근거를 등록합니다"
 )
@@ -3513,10 +3610,13 @@ async def market_publish(
         date = datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat()
         async with pool.acquire() as conn:
             async with conn.transaction():
+                await ensure_unscored_market_evaluations(
+                    conn, guild_id, date, stock
+                )
                 rows = await conn.fetch(
                     """SELECT e.id,e.stock_id,s.name,e.old_price,e.new_price,e.content_score,e.activity_score,
                               e.membership_score,e.events_score,e.growth_score,e.influence_score,e.opinion_score,
-                              e.base_score,e.random_score,e.final_score,e.change_percent,e.evidence
+                              e.base_score,e.random_score,e.final_score,e.change_percent,e.evidence,e.created_by
                          FROM bank_stock_evaluations e JOIN bank_stocks s ON s.id=e.stock_id
                         WHERE e.guild_id=$1 AND e.evaluation_date=$2 AND e.status='pending'
                           AND ($3::text IS NULL OR lower(trim(s.name))=lower(trim($3)))
@@ -3543,8 +3643,7 @@ async def market_publish(
                         guild_id,
                         row["stock_id"],
                         f"{row['name']} 일일 시세",
-                        f"기준가 {fmt(row['old_price'])} → {fmt(row['new_price'])} ({signed(row['change_percent'])}%)\n"
-                        f"평가 {signed(row['final_score'])}점 (콘텐츠 {signed(row['content_score'])}, 활동 {signed(row['activity_score'])}, 인원 {signed(row['membership_score'])}, 사건 {signed(row['events_score'])}, 성장 {signed(row['growth_score'])}, 영향력 {signed(row['influence_score'])}, 여론 {signed(row['opinion_score'])})\n근거: {row['evidence']}",
+                        market_news_content(row),
                     )
                 if stock is None:
                     await conn.execute(
@@ -3553,7 +3652,7 @@ async def market_publish(
                         date,
                     )
         message = "오늘 가상주식 시세 발표\n" + "\n\n".join(
-            f"**{row['name']}** · {fmt(row['old_price'])} → {fmt(row['new_price'])} ({signed(row['change_percent'])}%) · 평가 {signed(row['final_score'])}점\n{row['evidence']}"
+            market_report_line(row)
             for row in rows
         )
         await send_private(interaction, message)
@@ -3856,10 +3955,11 @@ async def publish_market_day(guild_id: str, run_date: str) -> list[asyncpg.Recor
             )
             if already_published:
                 return []
+            await ensure_unscored_market_evaluations(conn, guild_id, run_date)
             rows = await conn.fetch(
                 """SELECT e.id,e.stock_id,s.name,e.old_price,e.new_price,e.content_score,e.activity_score,
                           e.membership_score,e.events_score,e.growth_score,e.influence_score,e.opinion_score,
-                          e.base_score,e.random_score,e.final_score,e.change_percent,e.evidence
+                          e.base_score,e.random_score,e.final_score,e.change_percent,e.evidence,e.created_by
                      FROM bank_stock_evaluations e JOIN bank_stocks s ON s.id=e.stock_id
                     WHERE e.guild_id=$1 AND e.evaluation_date=$2 AND e.status='pending'
                     ORDER BY lower(s.name),s.name FOR UPDATE OF e""",
@@ -3882,9 +3982,7 @@ async def publish_market_day(guild_id: str, run_date: str) -> list[asyncpg.Recor
                     guild_id,
                     row["stock_id"],
                     f"{row['name']} 일일 시세",
-                    f"기준가 {fmt(row['old_price'])} → {fmt(row['new_price'])} ({signed(row['change_percent'])}%)\n"
-                    f"세부 점수: 콘텐츠 {row['content_score']}, 활동 {row['activity_score']}, 인원 {row['membership_score']}, 주요 사건 {row['events_score']}, 성장 {row['growth_score']}, 영향력 {row['influence_score']}, 여론 {row['opinion_score']}\n"
-                    f"기본 {row['base_score']}점 + 무작위 {signed(row['random_score'])}점 = 최종 {row['final_score']}점.\n근거: {row['evidence']}",
+                    market_news_content(row),
                 )
             await conn.execute(
                 "INSERT INTO bank_market_cycles (guild_id,cycle_date,stage) VALUES ($1,$2,'publish') ON CONFLICT DO NOTHING",
@@ -3913,7 +4011,7 @@ async def scheduled_tasks() -> None:
                 reports = await publish_market_day(guild_id, run_date)
                 if reports:
                     message = "오늘 가상주식 시세 발표\n" + "\n\n".join(
-                        f"**{row['name']}** · {fmt(row['old_price'])} → {fmt(row['new_price'])} ({signed(row['change_percent'])}%) · 평가 {signed(row['final_score'])}점\n{row['evidence']}"
+                        market_report_line(row)
                         for row in reports
                     )
                     await send_announcement(guild_id, message)

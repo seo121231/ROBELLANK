@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import main
 
@@ -21,6 +22,30 @@ class BankBotHelpersTest(unittest.TestCase):
         self.assertEqual(main.evaluation_change_range(-50), (-20, -18))
         with self.assertRaises(ValueError):
             main.evaluation_change_range(51)
+
+    def test_unscored_market_changes_allow_both_ten_percent_bounds(self):
+        with patch("main.random.randint", side_effect=[-10, 10]) as choose_change:
+            self.assertEqual(main.unscored_market_change(), -10)
+            self.assertEqual(main.unscored_market_change(), 10)
+
+        self.assertEqual(choose_change.call_args_list[0].args, (-10, 10))
+        self.assertEqual(choose_change.call_args_list[1].args, (-10, 10))
+        self.assertEqual(main.market_price_after_change(1_000, -10), 900)
+        self.assertEqual(main.market_price_after_change(1_000, 10), 1_100)
+        self.assertEqual(main.market_price_after_change(1, -10), 1)
+
+    def test_unscored_market_rows_are_labeled_as_random_movements(self):
+        row = {
+            "created_by": "system",
+            "evidence": main.UNSCORED_MARKET_EVIDENCE,
+            "name": "테스트 종목",
+            "old_price": 1_000,
+            "new_price": 1_050,
+            "change_percent": 5,
+            "final_score": 0,
+        }
+        self.assertTrue(main.is_unscored_market_evaluation(row))
+        self.assertIn("점수 미등록 · 무작위 변동", main.market_report_line(row))
 
     def test_slash_command_groups_include_stock_table_and_admin_rumor(self):
         commands = {
