@@ -51,7 +51,10 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
                 "DISCORD_BOT_TOKEN": "secondary-test-token",
             },
         ):
-            self.assertEqual(main.require_discord_token(), "primary-test-token")
+            with self.assertLogs(main.logger, level="INFO") as captured:
+                self.assertEqual(main.require_discord_token(), "primary-test-token")
+            self.assertIn("DISCORD_TOKEN", captured.output[0])
+            self.assertNotIn("primary-test-token", captured.output[0])
 
         with patch.dict(
             os.environ,

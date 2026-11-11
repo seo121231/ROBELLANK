@@ -38,14 +38,12 @@ MIXED_GROUP_DESCRIPTIONS = {
 
 
 def require_discord_token() -> str:
-    token = (os.getenv("DISCORD_TOKEN") or "").strip() or (
-        os.getenv("DISCORD_BOT_TOKEN") or ""
-    ).strip()
-    if not token:
-        raise RuntimeError(
-            "DISCORD_TOKEN or DISCORD_BOT_TOKEN is missing."
-        )
-    return token
+    for variable_name in ("DISCORD_TOKEN", "DISCORD_BOT_TOKEN"):
+        token = (os.getenv(variable_name) or "").strip()
+        if token:
+            logger.info("Loaded Discord bot token from %s", variable_name)
+            return token
+    raise RuntimeError("DISCORD_TOKEN or DISCORD_BOT_TOKEN is missing.")
 
 
 def configure_command_registry(tree: app_commands.CommandTree) -> None:
