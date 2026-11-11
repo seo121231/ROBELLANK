@@ -1,5 +1,6 @@
 import unittest
 import ast
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -42,6 +43,16 @@ class FakePool:
 
 
 class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
+    def test_discord_token_is_validated_before_startup(self):
+        with patch.dict(os.environ, {"DISCORD_BOT_TOKEN": "  dummy-test-token  "}):
+            self.assertEqual(main.require_discord_token(), "dummy-test-token")
+
+        with patch.dict(os.environ, {"DISCORD_BOT_TOKEN": "   "}):
+            with self.assertRaisesRegex(
+                RuntimeError, "DISCORD_BOT_TOKEN is missing"
+            ):
+                main.require_discord_token()
+
     def test_normalizes_stock_names_without_tickers(self):
         self.assertEqual(main.normalize_name("  Café   Market "), "café   market")
 

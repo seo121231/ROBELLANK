@@ -19,7 +19,6 @@ from discord.ext import tasks
 from localization import SUPPORTED_LANGUAGES, translate_known_text, translate_message
 
 
-TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -36,6 +35,16 @@ MIXED_GROUP_DESCRIPTIONS = {
     "bank-request": "은행 아이템 의뢰 (처리 하위 명령은 관리자 전용)",
     "market": "가상주식·시장 공지 (운영 하위 명령은 관리자 전용)",
 }
+
+
+def require_discord_token() -> str:
+    token = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
+    if not token:
+        raise RuntimeError(
+            "DISCORD_BOT_TOKEN is missing. Add the bot token to the secrets "
+            "for the environment running this process, then restart it."
+        )
+    return token
 
 
 def configure_command_registry(tree: app_commands.CommandTree) -> None:
@@ -308,8 +317,6 @@ class BankBot(discord.Client):
 
     async def setup_hook(self) -> None:
         global pool
-        if not TOKEN:
-            raise RuntimeError("DISCORD_BOT_TOKEN Secret is required.")
         if not DATABASE_URL:
             raise RuntimeError("DATABASE_URL must be set.")
         pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=8)
@@ -4374,7 +4381,7 @@ configure_command_registry(bot.tree)
 
 
 async def main() -> None:
-    await bot.start(TOKEN)
+    await bot.start(require_discord_token())
 
 
 if __name__ == "__main__":
