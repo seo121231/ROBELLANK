@@ -459,6 +459,13 @@ async def register(interaction: discord.Interaction) -> None:
     await safe_command(interaction, run)
 
 
+def trim_embed_text(value: object, max_length: int) -> str:
+    text = str(value)
+    if len(text) <= max_length:
+        return text
+    return text[: max_length - 1].rstrip() + "…"
+
+
 def build_account_embed(
     target: discord.User | discord.Member,
     rows: list[asyncpg.Record],
@@ -482,8 +489,8 @@ def build_account_embed(
         )
 
     for row in rows[:24]:
-        symbol = row["symbol"]
-        currency_name = row["name"]
+        symbol = trim_embed_text(row["symbol"], 20)
+        currency_name = trim_embed_text(row["name"], 100)
         label = (
             f"🪙 {currency_name} · {symbol}"
             if row["is_base"]

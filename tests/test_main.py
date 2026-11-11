@@ -149,6 +149,30 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("803 BR", embed.fields[1].value)
         self.assertFalse(embed.fields[0].inline)
 
+    def test_account_card_stays_within_discord_embed_limits(self):
+        user = SimpleNamespace(
+            display_name="Slayer",
+            display_avatar=SimpleNamespace(url="https://example.com/avatar.png"),
+        )
+        rows = [
+            {
+                "name": f"currency-{index}-" + "n" * 500,
+                "symbol": "S" * 500,
+                "is_base": index == 0,
+                "wallet": 2_147_483_647,
+                "deposit": 2_147_483_647,
+            }
+            for index in range(26)
+        ]
+
+        embed = main.build_account_embed(user, rows, False, "en")
+
+        self.assertEqual(len(embed.fields), 25)
+        self.assertLessEqual(len(embed.fields[0].name), 256)
+        self.assertLessEqual(len(embed.fields[0].value), 1024)
+        self.assertLessEqual(len(embed), 6000)
+        self.assertIn("2 more currencies omitted", embed.fields[-1].value)
+
     def test_english_market_report_translates_system_generated_evidence(self):
         message = (
             "오늘 가상주식 시세 발표\n"
