@@ -44,12 +44,27 @@ class FakePool:
 
 class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
     def test_discord_token_is_validated_before_startup(self):
-        with patch.dict(os.environ, {"DISCORD_BOT_TOKEN": "  dummy-test-token  "}):
-            self.assertEqual(main.require_discord_token(), "dummy-test-token")
+        with patch.dict(
+            os.environ,
+            {
+                "DISCORD_TOKEN": "  primary-test-token  ",
+                "DISCORD_BOT_TOKEN": "secondary-test-token",
+            },
+        ):
+            self.assertEqual(main.require_discord_token(), "primary-test-token")
 
-        with patch.dict(os.environ, {"DISCORD_BOT_TOKEN": "   "}):
+        with patch.dict(
+            os.environ,
+            {"DISCORD_TOKEN": "   ", "DISCORD_BOT_TOKEN": "  fallback-test-token  "},
+        ):
+            self.assertEqual(main.require_discord_token(), "fallback-test-token")
+
+        with patch.dict(
+            os.environ,
+            {"DISCORD_TOKEN": "", "DISCORD_BOT_TOKEN": ""},
+        ):
             with self.assertRaisesRegex(
-                RuntimeError, "DISCORD_BOT_TOKEN is missing"
+                RuntimeError, "DISCORD_TOKEN or DISCORD_BOT_TOKEN is missing"
             ):
                 main.require_discord_token()
 

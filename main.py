@@ -38,11 +38,12 @@ MIXED_GROUP_DESCRIPTIONS = {
 
 
 def require_discord_token() -> str:
-    token = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
+    token = (os.getenv("DISCORD_TOKEN") or "").strip() or (
+        os.getenv("DISCORD_BOT_TOKEN") or ""
+    ).strip()
     if not token:
         raise RuntimeError(
-            "DISCORD_BOT_TOKEN is missing. Add the bot token to the secrets "
-            "for the environment running this process, then restart it."
+            "DISCORD_TOKEN or DISCORD_BOT_TOKEN is missing."
         )
     return token
 

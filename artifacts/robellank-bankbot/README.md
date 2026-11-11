@@ -86,6 +86,6 @@ Discord 슬래시 명령으로 운영하는 서버별 가상 은행과 길드 �
 
 ## 실행
 
-비밀값 `DISCORD_BOT_TOKEN`과 `DATABASE_URL`이 설정되어 있어야 합니다. 데이터베이스 스키마는 `pnpm --filter @workspace/db run push`로 개발 DB에 반영합니다. Python 진입점은 프로젝트 루트의 `main.py`이며 `ROBELLANK Bank Bot` 워크플로가 `uv run python main.py`로 실행합니다.
+비밀값 `DISCORD_TOKEN` 또는 `DISCORD_BOT_TOKEN` 중 하나와 `DATABASE_URL`이 설정되어 있어야 합니다. 데이터베이스 스키마는 `pnpm --filter @workspace/db run push`로 개발 DB에 반영합니다. Python 진입점은 프로젝트 루트의 `main.py`이며 `ROBELLANK Bank Bot` 워크플로가 `uv run python main.py`로 실행합니다.
 
 Discord Developer Portal에서 봇을 서버에 초대할 때 `bot`과 `applications.commands` 스코프 및 서버에서 명령을 사용하고 공지를 보낼 권한을 부여하세요. 서버에 초대한 뒤 전역 슬래시 명령이 보이기까지 Discord 전파 시간이 걸릴 수 있습니다.
