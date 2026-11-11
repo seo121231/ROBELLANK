@@ -28,6 +28,7 @@ pool: asyncpg.Pool
 
 ADMIN_DESCRIPTION_PREFIX = "관리자 전용 · "
 ADMIN_ONLY_GROUPS = {"credit", "tier-config"}
+BANK_GOLD = 0xD7B43B
 MIXED_GROUP_DESCRIPTIONS = {
     "loan": "대출 신청·상환·조회 (심사 하위 명령은 관리자 전용)",
     "currency": "재화·환율·이자 (설정 하위 명령은 관리자 전용)",
@@ -458,6 +459,76 @@ async def register(interaction: discord.Interaction) -> None:
     await safe_command(interaction, run)
 
 
+def build_account_embed(
+    target: discord.User | discord.Member,
+    rows: list[asyncpg.Record],
+    frozen: bool,
+    language: str,
+) -> discord.Embed:
+    english = language == "en"
+    embed = discord.Embed(
+        title=(
+            f"{target.display_name}'s Account"
+            if english
+            else f"{target.display_name} 계좌"
+        ),
+        color=BANK_GOLD,
+    )
+    embed.set_thumbnail(url=target.display_avatar.url)
+    description_lines = []
+    if frozen:
+        description_lines.append(
+            "🔒 This account is frozen." if english else "🔒 동결된 계좌입니다."
+        )
+
+    for row in rows[:24]:
+        symbol = row["symbol"]
+        currency_name = row["name"]
+        label = (
+            f"🪙 {currency_name} · {symbol}"
+            if row["is_base"]
+            else f"🏦 {currency_name} · {symbol}"
+        )
+        wallet_label = "Wallet" if english else "지갑"
+        savings_label = "Savings" if english else "예금"
+        embed.add_field(
+            name=label,
+            value=(
+                f"**{wallet_label}**\n{fmt(row['wallet'] or 0)} {symbol}\n"
+                f"**{savings_label}**\n{fmt(row['deposit'] or 0)} {symbol}"
+            ),
+            inline=False,
+        )
+
+    if not rows:
+        description_lines.append(
+            "No active currencies are configured."
+            if english
+            else "사용 가능한 재화가 없습니다."
+        )
+    elif len(rows) > 24:
+        embed.add_field(
+            name="More" if english else "추가 재화",
+            value=(
+                f"{len(rows) - 24} more currencies omitted."
+                if english
+                else f"재화 {len(rows) - 24}개를 생략했습니다."
+            ),
+            inline=False,
+        )
+    if description_lines:
+        embed.description = "\n".join(description_lines)
+
+    embed.set_footer(
+        text=(
+            "ROBELLANK BANK · PERSONAL ACCOUNT"
+            if english
+            else "ROBELLANK BANK · 개인 계좌"
+        )
+    )
+    return embed
+
+
 @bot.tree.command(name="balance", description="지갑·예금 잔액을 확인합니다")
 @app_commands.describe(user="조회할 사용자 (생략하면 본인)")
 async def balance(
@@ -477,13 +548,12 @@ async def balance(
                 guild_id,
                 acct["id"],
             )
-        lines = [
-            f"**{row['name']}** ({row['symbol']}) · 지갑 {fmt(row['wallet'])} · 예금 {fmt(row['deposit'])}"
-            for row in rows
-        ]
-        await send_private(
+        language = await get_user_language(interaction.user.id)
+        await send_public(
             interaction,
-            f"<@{target.id}> 잔액\n" + ("\n".join(lines) or "잔액이 없습니다."),
+            embed=build_account_embed(target, rows, acct["frozen"], language),
+            view=BankMenuView(interaction.user.id, language),
+            language=language,
         )
 
     await safe_command(interaction, run)
@@ -1474,7 +1544,7 @@ def build_help_embed(language: str) -> discord.Embed:
     english = language == "en"
     embed = discord.Embed(
         title="ROBELLANK Bank Bot Help" if english else "ROBELLANK 은행 봇 도움말",
-        color=0x207E66,
+        color=BANK_GOLD,
     )
     embed.description = (
         "Commands are grouped into user and administrator sections below. "
@@ -1539,7 +1609,7 @@ def build_main_menu_embed(language: str) -> discord.Embed:
                 "Use the buttons below to open help, browse listed stocks, or switch "
                 "your language. Your language choice is saved to your Discord account."
             ),
-            color=0x207E66,
+            color=BANK_GOLD,
         )
     return discord.Embed(
         title="ROBELLANK 은행",
@@ -1547,7 +1617,7 @@ def build_main_menu_embed(language: str) -> discord.Embed:
             "아래 버튼으로 도움말을 열고, 상장 종목을 보거나, 표시 언어를 바꿀 수 있습니다. "
             "언어 설정은 디스코드 사용자별로 저장됩니다."
         ),
-        color=0x207E66,
+        color=BANK_GOLD,
     )
 
 
@@ -1562,7 +1632,7 @@ def build_stock_list_embed(
             if english
             else "기준가는 참고 가격이며 실제 체결가는 주문 매칭 결과에 따릅니다."
         ),
-        color=0x207E66,
+        color=BANK_GOLD,
     )
     if not rows:
         embed.description = (

@@ -1,6 +1,7 @@
 import unittest
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import main
@@ -112,6 +113,41 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             [button.label for button in view.children],
             ["Menu", "Help", "Stocks", "Language: English"],
         )
+
+    def test_account_card_uses_gold_embed_and_groups_each_currency(self):
+        user = SimpleNamespace(
+            display_name="Slayer",
+            display_avatar=SimpleNamespace(url="https://example.com/avatar.png"),
+        )
+        rows = [
+            {
+                "name": "bell",
+                "symbol": "B",
+                "is_base": True,
+                "wallet": 588_000,
+                "deposit": 28_000,
+            },
+            {
+                "name": "branch",
+                "symbol": "BR",
+                "is_base": False,
+                "wallet": 803,
+                "deposit": 0,
+            },
+        ]
+
+        embed = main.build_account_embed(user, rows, False, "en")
+
+        self.assertEqual(embed.color.value, main.BANK_GOLD)
+        self.assertEqual(embed.title, "Slayer's Account")
+        self.assertEqual(embed.thumbnail.url, "https://example.com/avatar.png")
+        self.assertEqual(len(embed.fields), 2)
+        self.assertIn("Wallet", embed.fields[0].value)
+        self.assertIn("588,000 B", embed.fields[0].value)
+        self.assertIn("Savings", embed.fields[0].value)
+        self.assertIn("28,000 B", embed.fields[0].value)
+        self.assertIn("803 BR", embed.fields[1].value)
+        self.assertFalse(embed.fields[0].inline)
 
     def test_english_market_report_translates_system_generated_evidence(self):
         message = (
