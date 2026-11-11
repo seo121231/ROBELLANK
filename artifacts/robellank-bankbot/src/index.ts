@@ -24,8 +24,10 @@ import { getTier, resolveTier, tierAtLeast } from "./tiers";
 import type { TierKey } from "./tiers";
 
 const logger = pino({ level: process.env.LOG_LEVEL ?? "info" });
-const token = process.env.DISCORD_BOT_TOKEN;
-if (!token) throw new Error("DISCORD_BOT_TOKEN Secret is required.");
+const token =
+  (process.env.DISCORD_TOKEN ?? "").trim() ||
+  (process.env.DISCORD_BOT_TOKEN ?? "").trim();
+if (!token) throw new Error("DISCORD_TOKEN or DISCORD_BOT_TOKEN is missing.");
 
 type PendingAction =
   | {
