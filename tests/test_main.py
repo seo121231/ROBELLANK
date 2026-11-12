@@ -113,39 +113,58 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(main.is_unscored_market_evaluation(row))
         self.assertIn("점수 미등록 · 무작위 변동", main.market_report_line(row))
 
-    def test_commands_are_grouped_into_five_categories(self):
+    def test_only_ten_english_slash_commands_are_registered(self):
         commands = {
             command.name: command.to_dict(main.bot.tree)
             for command in main.bot.tree.get_commands()
         }
-        self.assertEqual(set(commands), {"프로필", "저장소", "저축", "주식", "기타"})
-        stock_options = {
-            option["name"]: option for option in commands["주식"]["options"]
-        }
-        market_commands = {
-            option["name"] for option in stock_options["시장"]["options"]
-        }
+        self.assertEqual(
+            set(commands),
+            {
+                "menu",
+                "help",
+                "profile",
+                "storage",
+                "requests",
+                "savings",
+                "loan",
+                "stocks",
+                "market",
+                "admin",
+            },
+        )
+        self.assertLessEqual(len(commands), 15)
         stock_commands = {
-            option["name"] for option in stock_options["거래"]["options"]
+            command.name
+            for command in main.ACTION_COMMANDS_BY_CATEGORY["stocks"]
         }
-        self.assertIn("소문", market_commands)
-        self.assertIn("시세표", stock_commands)
-        savings_options = {
-            option["name"] for option in commands["저축"]["options"]
-        }
-        self.assertIn("재화목록", savings_options)
-        self.assertTrue(all(len(command["options"]) <= 25 for command in commands.values()))
+        self.assertIn("table", stock_commands)
+        self.assertIn(
+            "news",
+            {command.name for command in main.ACTION_COMMANDS_BY_CATEGORY["market"]},
+        )
+        self.assertIn(
+            "currencies",
+            {command.name for command in main.ACTION_COMMANDS_BY_CATEGORY["savings"]},
+        )
+        self.assertTrue(
+            all(
+                len(actions) <= 25
+                for actions in main.ACTION_COMMANDS_BY_CATEGORY.values()
+            )
+        )
+        self.assertTrue(
+            all(not isinstance(command, main.app_commands.Group) for command in main.bot.tree.get_commands())
+        )
 
     def test_language_and_menu_commands_are_registered(self):
-        profile = main.bot.tree.get_command("프로필")
-        language = profile.get_command("언어")
-        menu = profile.get_command("메뉴")
+        language = main.ACTION_COMMANDS_BY_PATH["profile language"]
+        menu = main.bot.tree.get_command("menu")
 
         self.assertIsNotNone(language)
         self.assertIsNotNone(menu)
-        language_option = language.to_dict(main.bot.tree)["options"][0]
         self.assertEqual(
-            {choice["value"] for choice in language_option["choices"]},
+            {choice.value for choice in language.parameters[0].choices},
             {"ko", "en"},
         )
 
@@ -154,21 +173,151 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             [option.value for option in view.children[0].options],
-            ["프로필", "저장소", "저축", "주식", "기타"],
+            [
+                "profile",
+                "storage",
+                "requests",
+                "savings",
+                "loan",
+                "stocks",
+                "market",
+                "admin",
+            ],
         )
-        self.assertEqual(
-            [button.label for button in view.children[1:]],
-            ["Menu", "Help", "Stocks", "Language: English"],
+        labels = [button.label for button in view.children[1:]]
+        self.assertIn("Transfer", labels)
+        self.assertIn("Deposit", labels)
+        self.assertIn("Help", labels)
+        self.assertIn("Language: English", labels)
+        self.assertLessEqual(len(view.children), 25)
+        self.assertLessEqual(len(labels), 15)
+        stock_actions = main.CategoryActionView(123456, "en", "stocks")
+        self.assertIn(
+            "stocks stock buy",
+            {option.value for option in stock_actions.children[0].options},
         )
 
+    def test_menu_quick_actions_resolve_to_registered_commands(self):
+        paths = list(main.MENU_COMMAND_PATHS.values())
+        paths.extend(
+            [
+                "savings transfer",
+                "savings deposit",
+                "savings exchange",
+                "stocks stock buy",
+                "stocks stock sell",
+            ]
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertIsNotNone(main.get_command_by_path(path).callback)
+
+        for action, fields in main.BankActionModal.FORM_FIELDS.items():
+            modal = main.BankActionModal(123456, action)
+            self.assertEqual(set(modal.inputs), {field[0] for field in fields})
+            self.assertLessEqual(len(modal.children), 5)
+        evaluation = main.CommandActionModal(
+            123456, main.get_command_by_path("market evaluate")
+        )
+        self.assertEqual(len(evaluation.children), 5)
+        next_page = main.CommandActionModal(
+            123456,
+            main.get_command_by_path("market evaluate"),
+            values={
+                "stock": "Example",
+                "content": 1,
+                "activity": 1,
+                "membership": 1,
+                "events": 1,
+            },
+        )
+        self.assertEqual(len(next_page.children), 4)
+        adjustment = main.ACTION_COMMANDS_BY_PATH["admin credit adjust"]
+        choice_view = main.ChoiceActionView(
+            123456,
+            adjustment,
+            [parameter for parameter in adjustment.parameters if parameter.choices],
+        )
+        self.assertEqual(len(choice_view.children[0].options), 16)
+
+    async def test_action_modal_parses_choices_and_enforces_numeric_ranges(self):
+        evaluation = main.get_command_by_path("market evaluate")
+        modal = main.CommandActionModal(123456, evaluation)
+        score_parameter = next(
+            parameter for parameter in evaluation.parameters if parameter.name == "content"
+        )
+        self.assertEqual(
+            await modal.parse_value(SimpleNamespace(), score_parameter, "5"),
+            5,
+        )
+        with self.assertRaises(ValueError):
+            await modal.parse_value(SimpleNamespace(), score_parameter, "7")
+
+        rumor = main.get_command_by_path("market rumor")
+        kind_parameter = next(
+            parameter for parameter in rumor.parameters if parameter.name == "kind"
+        )
+        choice = await modal.parse_value(
+            SimpleNamespace(), kind_parameter, "Unverified rumor"
+        )
+        self.assertEqual(choice.value, "fake_information")
+
+    async def test_admin_button_actions_still_require_server_administrator(self):
+        command = main.ACTION_COMMANDS_BY_PATH["admin mint"]
+        regular_user = SimpleNamespace(
+            guild_permissions=SimpleNamespace(administrator=False)
+        )
+        admin_user = SimpleNamespace(
+            guild_permissions=SimpleNamespace(administrator=True)
+        )
+
+        with self.assertRaisesRegex(ValueError, "server administrators"):
+            await main.require_action_permission(
+                SimpleNamespace(user=regular_user), command
+            )
+        await main.require_action_permission(SimpleNamespace(user=admin_user), command)
+
+    def test_help_lists_only_english_slash_commands(self):
+        lines = main.build_help_embed("ko").description.splitlines()
+        self.assertEqual(
+            lines,
+            [
+                "/menu",
+                "/profile",
+                "/storage",
+                "/requests",
+                "/savings",
+                "/loan",
+                "/stocks",
+                "/market",
+                "/admin",
+                "/help",
+            ],
+        )
+
+    def test_registered_command_descriptions_and_choices_are_english(self):
+        commands = [
+            *main.bot.tree.get_commands(),
+            *main.ACTION_COMMANDS_BY_PATH.values(),
+        ]
+        for command in commands:
+            self.assertNotRegex(command.name, r"[가-힣]")
+            self.assertNotRegex(command.description, r"[가-힣]")
+            if isinstance(command, main.app_commands.Group):
+                continue
+            for parameter in command.parameters:
+                self.assertNotRegex(parameter.description, r"[가-힣]")
+                for choice in parameter.choices:
+                    self.assertNotRegex(choice.name, r"[가-힣]")
+
     def test_tier_benefits_use_one_command_and_select_menu(self):
-        other = main.bot.tree.get_command("기타")
-        command = other.get_command("혜택설정")
-        credit = other.get_command("신용")
+        command = main.ACTION_COMMANDS_BY_PATH["admin tier-benefits"]
+        credit = main.ACTION_COMMANDS_BY_PATH["admin credit set"].parent
 
         self.assertIsNotNone(command)
         self.assertFalse(isinstance(command, main.app_commands.Group))
-        self.assertEqual(len(credit.commands), 2)
+        self.assertIn("admin credit set", main.ACTION_COMMANDS_BY_PATH)
+        self.assertIn("admin credit adjust", main.ACTION_COMMANDS_BY_PATH)
 
         settings = {
             "platinum_loan_bonus": 100_000,
@@ -302,10 +451,10 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_language_setting_translates_known_messages_and_keeps_korean(self):
-        original = "계좌가 없습니다. 먼저 /프로필 계좌개설을 사용하세요."
+        original = "계좌가 없습니다. 먼저 /profile register를 사용하세요."
         self.assertEqual(
             translate_message(original, "en"),
-            "You do not have an account. Run /프로필 계좌개설 first.",
+            "You do not have an account. Run /profile register first.",
         )
         self.assertEqual(translate_message(original, "ko"), original)
 
@@ -346,27 +495,24 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ephemeral_true_calls, [])
 
     def test_market_channel_uses_text_autocomplete_and_is_admin_only(self):
-        market_group = main.bot.tree.get_command("주식").get_command("시장")
-        channel_command = market_group.get_command("공지채널")
-        channel_option = next(
-            option
-            for option in channel_command.to_dict(main.bot.tree)["options"]
-            if option["name"] == "channel"
-        )
+        channel_command = main.ACTION_COMMANDS_BY_PATH["market channel"]
+        channel_parameter = channel_command.parameters[0]
 
-        self.assertEqual(channel_option["type"], 3)
-        self.assertTrue(channel_option["autocomplete"])
+        self.assertEqual(
+            channel_parameter.type, main.discord.AppCommandOptionType.string
+        )
+        self.assertIsNotNone(channel_parameter._Parameter__parent.autocomplete)
         self.assertTrue(
             channel_command.description.startswith(main.ADMIN_DESCRIPTION_PREFIX)
         )
         self.assertEqual(len(channel_command.checks), 1)
 
     def test_admin_commands_are_labeled_and_restricted_in_discord(self):
-        other = main.bot.tree.get_command("기타")
-        mint = other.get_command("지급")
-        credit = other.get_command("신용")
-        credit_adjust = credit.get_command("사유조정")
-        benefits = other.get_command("혜택설정")
+        other = main.bot.tree.get_command("admin")
+        mint = main.ACTION_COMMANDS_BY_PATH["admin mint"]
+        credit = main.ACTION_COMMANDS_BY_PATH["admin credit set"].parent
+        credit_adjust = main.ACTION_COMMANDS_BY_PATH["admin credit adjust"]
+        benefits = main.ACTION_COMMANDS_BY_PATH["admin tier-benefits"]
 
         self.assertTrue(mint.description.startswith(main.ADMIN_DESCRIPTION_PREFIX))
         self.assertTrue(other.default_permissions.administrator)

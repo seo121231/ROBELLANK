@@ -6,7 +6,9 @@ import logging
 import math
 import os
 import random
+import re
 import unicodedata
+import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -25,15 +27,21 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("robellank-bankbot")
 pool: asyncpg.Pool
 
-ADMIN_DESCRIPTION_PREFIX = "관리자 전용 · "
+ADMIN_DESCRIPTION_PREFIX = "Admin only · "
 BANK_GOLD = 0xD7B43B
 COMMAND_CATEGORIES = (
     ("profile", "Accounts, balances, tier, history, and language"),
     ("storage", "Bank storage and item requests"),
-    ("savings", "Currency list, transfers, exchanges, deposits, and loans"),
-    ("stocks", "Virtual stock trading, holdings, and market tools"),
-    ("other", "Administrative currency, account, credit, and tier settings"),
+    ("requests", "Bank item requests"),
+    ("savings", "Currency, transfers, exchanges, and deposits"),
+    ("loan", "Loan requests, repayments, and reviews"),
+    ("stocks", "Virtual stock trading and holdings"),
+    ("market", "Stock listings, evaluations, and announcements"),
+    ("admin", "Administrative bank settings and account controls"),
 )
+ACTION_COMMANDS_BY_PATH: dict[str, app_commands.Command] = {}
+ACTION_COMMANDS_BY_CATEGORY: dict[str, list[app_commands.Command]] = {}
+PENDING_ACTIONS: dict[str, dict[str, object]] = {}
 
 
 def require_discord_token() -> str:
@@ -46,7 +54,49 @@ def require_discord_token() -> str:
 
 
 def configure_command_registry(tree: app_commands.CommandTree) -> None:
+    choice_labels = {
+        "ko": "Korean",
+        "en": "English",
+        "accepted": "Accept",
+        "declined": "Decline",
+        "fulfilled": "Fulfilled",
+        "fake_information": "Unverified rumor",
+        "investment_tip": "Investment tip",
+        "savings_maturity": "Savings maturity (+2)",
+        "savings_early": "Early savings closure (-1)",
+        "collateral_on_time": "Collateral repaid on time (+3)",
+        "collateral_early": "Early collateral repayment (+1)",
+        "collateral_overdue": "Collateral overdue (-5)",
+        "credit_on_time": "Credit repaid on time (+3)",
+        "credit_early": "Early credit repayment (+1)",
+        "credit_overdue": "Credit overdue (-5)",
+        "long_overdue": "Long overdue (-10)",
+        "rule_violation": "Rule violation (-3)",
+        "false_application": "False application (-10)",
+        "rule_abuse": "Rule abuse (-5)",
+        "fraud": "Fraud or deception (-25)",
+        "punishment_evasion": "Punishment evasion (-15)",
+        "bank_damage": "Bank operation damage (-15)",
+        "bank_staff": "Bank staff appointment (+10)",
+    }
+
+    def english_copy(value: str, fallback: str) -> str:
+        translated = translate_known_text(value, "en")
+        return fallback if re.search(r"[가-힣]", translated) else translated
+
+    def remove_admin_prefix(value: str) -> str:
+        for prefix in (
+            "관리자 전용 ·",
+            "관리자:",
+            ADMIN_DESCRIPTION_PREFIX,
+            "Administrator only ·",
+            "Administrator:",
+        ):
+            value = value.removeprefix(prefix).strip()
+        return value
+
     for command in tree.walk_commands():
+        command_path = command.qualified_name.replace("-", " ").title()
         if isinstance(command, app_commands.Group):
             descendants = list(command.walk_commands())
             leaf_commands = [
@@ -54,24 +104,49 @@ def configure_command_registry(tree: app_commands.CommandTree) -> None:
                 for descendant in descendants
                 if not isinstance(descendant, app_commands.Group)
             ]
+            description = remove_admin_prefix(command.description)
+            command.description = english_copy(
+                description, f"Open {command.name.replace('-', ' ').title()} tools"
+            )[:100]
             if leaf_commands and all(leaf.checks for leaf in leaf_commands):
-                description = command.description.removeprefix("관리자:").strip()
                 command.description = (
-                    ADMIN_DESCRIPTION_PREFIX + description[:85]
+                    ADMIN_DESCRIPTION_PREFIX
+                    + command.description[: 100 - len(ADMIN_DESCRIPTION_PREFIX)]
                 )
                 app_commands.default_permissions(administrator=True)(command)
             continue
-        if not getattr(command, "checks", ()):
-            continue
 
-        description = command.description
-        if description.startswith("관리자:"):
-            description = description.removeprefix("관리자:").strip()
-        if not description.startswith(ADMIN_DESCRIPTION_PREFIX):
-            max_detail_length = 100 - len(ADMIN_DESCRIPTION_PREFIX)
-            command.description = (
-                ADMIN_DESCRIPTION_PREFIX + description[:max_detail_length]
+        description = remove_admin_prefix(command.description)
+        description = english_copy(description, f"Run the {command_path} action")
+        if getattr(command, "checks", ()):
+            description = (
+                ADMIN_DESCRIPTION_PREFIX
+                + description[: 100 - len(ADMIN_DESCRIPTION_PREFIX)]
             )
+        command.description = description[:100]
+
+        for parameter in command.parameters:
+            parent_parameter = parameter._Parameter__parent
+            parameter_description = english_copy(
+                parameter.description,
+                f"Enter {parameter.name.replace('_', ' ')}",
+            )
+            parent_parameter.description = parameter_description[:100]
+            if parent_parameter.choices:
+                parent_parameter.choices = [
+                    app_commands.Choice(
+                        name=(
+                            choice.name
+                            if not re.search(r"[가-힣]", choice.name)
+                            else choice_labels.get(
+                                str(choice.value),
+                                str(choice.value).replace("_", " ").title(),
+                            )
+                        )[:100],
+                        value=choice.value,
+                    )
+                    for choice in parent_parameter.choices
+                ]
 
 
 
@@ -1545,36 +1620,25 @@ async def help_command(interaction: discord.Interaction) -> None:
 
 
 def build_help_embed(language: str) -> discord.Embed:
-    lines = ["/help"]
-    for category_name, _ in COMMAND_CATEGORIES:
-        root = bot.tree.get_command(category_name)
-        if not isinstance(root, app_commands.Group):
-            continue
-        for command in root.walk_commands():
-            if isinstance(command, app_commands.Group):
-                continue
-            path = f"/{command.qualified_name}"
-            parameters = [
-                f"<{option['name']}>" if option.get("required") else f"[{option['name']}]"
-                for option in command.to_dict(bot.tree).get("options", [])
-            ]
-            lines.append(" ".join([path, *parameters]))
-        lines.append("")
+    lines = [
+        f"/{command.name}"
+        for command in bot.tree.get_commands()
+        if command.name != "help"
+    ]
+    lines.append("/help")
     return discord.Embed(
-        description="\n".join(lines).rstrip(),
+        description="\n".join(lines),
         color=BANK_GOLD,
     )
 
 
 def build_category_embed(category_name: str, language: str) -> discord.Embed:
-    root = bot.tree.get_command(category_name)
-    if not isinstance(root, app_commands.Group):
+    commands = ACTION_COMMANDS_BY_CATEGORY.get(category_name)
+    if commands is None:
         raise ValueError("명령 범주를 찾을 수 없습니다.")
     lines = [
-        f"/{command.qualified_name} — "
-        f"{translate_known_text(command.description, language)}"
-        for command in root.walk_commands()
-        if not isinstance(command, app_commands.Group)
+        f"{command.name} — {command.description}"
+        for command in commands
     ]
     return discord.Embed(
         title=category_name,
@@ -1652,13 +1716,15 @@ class BankMenuView(discord.ui.View):
         super().__init__(timeout=300)
         self.owner_id = owner_id
         english = language == "en"
-        category_labels = {name: name.title() for name, _ in COMMAND_CATEGORIES}
         category_select = discord.ui.Select(
             placeholder="Choose a category" if english else "명령 범주 선택",
             min_values=1,
             max_values=1,
             options=[
-                discord.SelectOption(label=category_labels[name], value=name)
+                discord.SelectOption(
+                    label=name.replace("-", " ").title(),
+                    value=name,
+                )
                 for name, _ in COMMAND_CATEGORIES
             ],
         )
@@ -1670,22 +1736,23 @@ class BankMenuView(discord.ui.View):
 
         category_select.callback = select_category
         self.add_item(category_select)
-        labels = (
-            [
-                ("menu", "Menu", discord.ButtonStyle.secondary),
-                ("help", "Help", discord.ButtonStyle.primary),
-                ("stocks", "Stocks", discord.ButtonStyle.primary),
-                ("language", "Language: English", discord.ButtonStyle.success),
-            ]
-            if language == "en"
-            else [
-                ("menu", "메뉴", discord.ButtonStyle.secondary),
-                ("help", "도움말", discord.ButtonStyle.primary),
-                ("stocks", "주식 목록", discord.ButtonStyle.primary),
-                ("language", "언어: 한국어", discord.ButtonStyle.success),
-            ]
-        )
-        for action, label, style in labels:
+        actions = [
+            ("account", "Account", discord.ButtonStyle.primary),
+            ("transfer", "Transfer", discord.ButtonStyle.primary),
+            ("deposit", "Deposit", discord.ButtonStyle.success),
+            ("withdraw", "Withdraw", discord.ButtonStyle.secondary),
+            ("exchange", "Exchange", discord.ButtonStyle.secondary),
+            ("stock-list", "Stock list", discord.ButtonStyle.primary),
+            ("portfolio", "Portfolio", discord.ButtonStyle.primary),
+            ("help", "Help", discord.ButtonStyle.primary),
+            ("menu", "Main menu", discord.ButtonStyle.secondary),
+            (
+                "language",
+                "Language: English" if english else "Language: Korean",
+                discord.ButtonStyle.success,
+            ),
+        ]
+        for action, label, style in actions:
             button = discord.ui.Button(
                 label=label, style=style, custom_id=f"robellank-menu:{action}"
             )
@@ -1722,9 +1789,30 @@ class BankMenuView(discord.ui.View):
                 rows = await list_stocks(require_guild(interaction))
                 embed = build_stock_list_embed(rows, language)
             elif action.startswith("category:"):
+                category_name = action.removeprefix("category:")
                 embed = build_category_embed(
-                    action.removeprefix("category:"), language
+                    category_name, language
                 )
+                next_view: discord.ui.View | None = CategoryActionView(
+                    self.owner_id, language, category_name
+                )
+            elif action in {
+                "transfer",
+                "deposit",
+                "withdraw",
+                "exchange",
+            }:
+                await interaction.response.send_modal(
+                    BankActionModal(interaction.user.id, action)
+                )
+                return
+            elif action in MENU_COMMAND_PATHS:
+                await invoke_menu_command(
+                    interaction,
+                    MENU_COMMAND_PATHS[action],
+                    **MENU_COMMAND_ARGUMENTS.get(action, {}),
+                )
+                return
             else:
                 embed = build_main_menu_embed(language)
             await interaction.response.edit_message(
@@ -1732,6 +1820,8 @@ class BankMenuView(discord.ui.View):
                 view=(
                     None
                     if action == "help"
+                    else next_view
+                    if action.startswith("category:")
                     else BankMenuView(interaction.user.id, language)
                 ),
             )
@@ -1740,6 +1830,597 @@ class BankMenuView(discord.ui.View):
             await send_public(
                 interaction,
                 "메뉴를 열지 못했습니다. 다시 시도하거나 관리자에게 문의하세요.",
+            )
+
+
+MENU_COMMAND_PATHS = {
+    "account": "profile balance",
+    "stock-list": "stocks stock list",
+    "portfolio": "stocks portfolio",
+}
+MENU_COMMAND_ARGUMENTS: dict[str, dict[str, object]] = {"account": {"user": None}}
+
+
+def get_command_by_path(path: str) -> app_commands.Command:
+    action_command = ACTION_COMMANDS_BY_PATH.get(path)
+    if action_command is not None:
+        return action_command
+    parts = path.split()
+    command = bot.tree.get_command(parts[0])
+    if command is None:
+        raise ValueError(f"Command path is not registered: {path}")
+    for part in parts[1:]:
+        if not isinstance(command, app_commands.Group):
+            raise ValueError(f"Command path is not registered: {path}")
+        command = command.get_command(part)
+        if command is None:
+            raise ValueError(f"Command path is not registered: {path}")
+    if isinstance(command, app_commands.Group):
+        raise ValueError(f"A command action is required for: {path}")
+    return command
+
+
+async def invoke_menu_command(
+    interaction: discord.Interaction,
+    path: str,
+    **arguments: object,
+) -> None:
+    command = get_command_by_path(path)
+    await invoke_action_command(interaction, command, arguments)
+
+
+async def require_action_permission(
+    interaction: discord.Interaction,
+    command: app_commands.Command,
+) -> None:
+    if not command.checks:
+        return
+    permissions = getattr(interaction.user, "guild_permissions", None)
+    if not permissions or not permissions.administrator:
+        raise ValueError("This action is available to server administrators only.")
+
+
+async def invoke_action_command(
+    interaction: discord.Interaction,
+    command: app_commands.Command,
+    arguments: dict[str, object],
+) -> None:
+    await require_action_permission(interaction, command)
+    if interaction.guild_id and not interaction.user.bot:
+        await sync_tier(
+            str(interaction.guild_id),
+            str(interaction.user.id),
+            tier_for(interaction.user),
+        )
+    await command.callback(interaction, **arguments)
+
+
+async def start_action_command(
+    interaction: discord.Interaction,
+    command: app_commands.Command,
+    owner_id: int,
+) -> None:
+    try:
+        await require_action_permission(interaction, command)
+    except ValueError as error:
+        await send_private(interaction, str(error))
+        return
+
+    if not command.parameters:
+        await invoke_action_command(interaction, command, {})
+        return
+
+    simple_forms = {
+        "savings transfer": "transfer",
+        "savings deposit": "deposit",
+        "savings exchange": "exchange",
+        "stocks stock buy": "buy-stock",
+        "stocks stock sell": "sell-stock",
+    }
+    action = simple_forms.get(command.qualified_name)
+    modal = (
+        BankActionModal(owner_id, action)
+        if action
+        else None
+    )
+    if modal is not None:
+        await interaction.response.send_modal(modal)
+        return
+
+    choice_parameters = [
+        parameter for parameter in command.parameters if parameter.choices
+    ]
+    if choice_parameters:
+        await interaction.response.send_message(
+            "Choose the required options, then continue.",
+            view=ChoiceActionView(owner_id, command, choice_parameters),
+        )
+        return
+    await interaction.response.send_modal(CommandActionModal(owner_id, command))
+
+
+class BankActionModal(discord.ui.Modal):
+    FORM_FIELDS = {
+        "transfer": (
+            ("user", "Member ID or mention", "Mention a server member or enter their ID"),
+            ("currency", "Currency", "Currency name"),
+            ("amount", "Amount", "Whole number"),
+        ),
+        "deposit": (
+            ("currency", "Currency", "Currency name"),
+            ("amount", "Amount", "Whole number"),
+        ),
+        "withdraw": (
+            ("currency", "Currency", "Currency name"),
+            ("amount", "Amount", "Whole number"),
+        ),
+        "exchange": (
+            ("from_currency", "From currency", "Currency to exchange"),
+            ("to", "To currency", "Currency to receive"),
+            ("amount", "Amount", "Whole number"),
+        ),
+        "buy-stock": (
+            ("stock", "Stock", "Listed stock name"),
+            ("shares", "Shares", "Whole number"),
+            ("limit_price", "Limit price", "Price per share"),
+        ),
+        "sell-stock": (
+            ("stock", "Stock", "Listed stock name"),
+            ("shares", "Shares", "Whole number"),
+            ("limit_price", "Limit price", "Price per share"),
+        ),
+    }
+
+    def __init__(self, owner_id: int, action: str):
+        super().__init__(
+            title={
+                "transfer": "Transfer",
+                "deposit": "Deposit",
+                "withdraw": "Withdraw",
+                "exchange": "Exchange",
+                "buy-stock": "Buy stock",
+                "sell-stock": "Sell stock",
+            }[action],
+            timeout=300,
+        )
+        self.owner_id = owner_id
+        self.action = action
+        self.inputs: dict[str, discord.ui.TextInput] = {}
+        for name, label, placeholder in self.FORM_FIELDS[action]:
+            field = discord.ui.TextInput(
+                label=label,
+                placeholder=placeholder,
+                max_length=100,
+                required=True,
+            )
+            self.inputs[name] = field
+            self.add_item(field)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.owner_id:
+            await send_private(interaction, "Only the user who opened this form can submit it.")
+            return
+        try:
+            values = {name: field.value.strip() for name, field in self.inputs.items()}
+            if "amount" in values or "shares" in values:
+                number_key = "amount" if "amount" in values else "shares"
+                quantity = int(values[number_key].replace(",", ""))
+                if not 1 <= quantity <= 2_147_483_647:
+                    raise ValueError("Enter a whole number between 1 and 2,147,483,647.")
+                values[number_key] = quantity
+            if "limit_price" in values:
+                limit_price = int(values["limit_price"].replace(",", ""))
+                if not 1 <= limit_price <= 2_147_483_647:
+                    raise ValueError("Limit price must be between 1 and 2,147,483,647.")
+                values["limit_price"] = limit_price
+
+            if self.action == "transfer":
+                member_input = values.pop("user")
+                match = re.fullmatch(r"(?:<@!?(\d+)>|(\d+))", member_input)
+                if not match or interaction.guild is None:
+                    raise ValueError("Enter a valid server member mention or ID.")
+                member_id = int(match.group(1) or match.group(2))
+                member = interaction.guild.get_member(member_id)
+                if member is None:
+                    member = await interaction.guild.fetch_member(member_id)
+                values["user"] = member
+
+            if self.action in {"deposit", "withdraw"}:
+                values["direction"] = app_commands.Choice(
+                    name=self.action.title(),
+                    value=self.action,
+                )
+                path = "savings deposit"
+            elif self.action == "transfer":
+                path = "savings transfer"
+            elif self.action == "exchange":
+                path = "savings exchange"
+            else:
+                path = (
+                    "stocks stock buy"
+                    if self.action == "buy-stock"
+                    else "stocks stock sell"
+                )
+            await invoke_menu_command(interaction, path, **values)
+        except ValueError as error:
+            await send_private(interaction, str(error))
+        except discord.NotFound:
+            await send_private(interaction, "That member is not in this server.")
+        except Exception:
+            logger.exception("Bank action form failed")
+            await send_private(
+                interaction,
+                "The action could not be completed. Please try again or contact an administrator.",
+            )
+
+
+class CategoryActionView(discord.ui.View):
+    def __init__(self, owner_id: int, language: str, category: str):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.language = language
+        self.category = category
+        self.selected_path: str | None = None
+        commands = [
+            command
+            for command in ACTION_COMMANDS_BY_CATEGORY.get(category, [])
+            if command.name != "menu"
+        ]
+        selector = discord.ui.Select(
+            placeholder="Choose an action",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label=command.name.replace("-", " ").title()[:100],
+                    value=command.qualified_name,
+                    description=command.description[:100],
+                )
+                for command in commands[:25]
+            ],
+        )
+
+        async def select_action(interaction: discord.Interaction) -> None:
+            self.selected_path = selector.values[0]
+            await interaction.response.edit_message(view=self)
+
+        selector.callback = select_action
+        self.add_item(selector)
+
+        run_button = discord.ui.Button(
+            label="Run selected action",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"robellank-action-run:{category}",
+        )
+
+        async def run_selected(interaction: discord.Interaction) -> None:
+            if self.selected_path is None:
+                await send_private(interaction, "Choose an action first.")
+                return
+            try:
+                command = get_command_by_path(self.selected_path)
+                await start_action_command(interaction, command, self.owner_id)
+            except Exception:
+                logger.exception("Selected bank action could not be started")
+                await send_private(interaction, "The action could not be started.")
+
+        run_button.callback = run_selected
+        self.add_item(run_button)
+
+        back_button = discord.ui.Button(
+            label="Back to menu",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"robellank-action-back:{category}",
+        )
+
+        async def go_back(interaction: discord.Interaction) -> None:
+            await interaction.response.edit_message(
+                embed=localize_embed(
+                    build_main_menu_embed(self.language), self.language
+                ),
+                view=BankMenuView(self.owner_id, self.language),
+            )
+
+        back_button.callback = go_back
+        self.add_item(back_button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await send_private(
+                interaction, "Only the user who opened this menu can use it."
+            )
+            return False
+        return True
+
+
+class ChoiceActionView(discord.ui.View):
+    def __init__(
+        self,
+        owner_id: int,
+        command: app_commands.Command,
+        parameters: list[app_commands.Parameter],
+    ):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.command = command
+        self.parameters = parameters
+        self.selected_values: dict[str, object] = {}
+
+        for parameter in parameters:
+            selector = discord.ui.Select(
+                placeholder=f"Choose {parameter.name.replace('_', ' ')}",
+                min_values=1,
+                max_values=1,
+                options=[
+                    discord.SelectOption(
+                        label=choice.name[:100],
+                        value=str(choice.value)[:100],
+                    )
+                    for choice in parameter.choices[:25]
+                ],
+                custom_id=f"robellank-choice:{command.name}:{parameter.name}",
+            )
+
+            async def choose_option(
+                interaction: discord.Interaction,
+                selected_parameter: app_commands.Parameter = parameter,
+                selected_selector: discord.ui.Select = selector,
+            ) -> None:
+                raw_value = selected_selector.values[0]
+                option = next(
+                    choice
+                    for choice in selected_parameter.choices
+                    if str(choice.value) == raw_value
+                )
+                self.selected_values[selected_parameter.name] = app_commands.Choice(
+                    name=option.name,
+                    value=option.value,
+                )
+                await interaction.response.edit_message(view=self)
+
+            selector.callback = choose_option
+            self.add_item(selector)
+
+        continue_button = discord.ui.Button(
+            label="Continue",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"robellank-choice-continue:{command.name}",
+        )
+
+        async def continue_action(interaction: discord.Interaction) -> None:
+            missing = [
+                parameter.name
+                for parameter in self.parameters
+                if parameter.name not in self.selected_values
+            ]
+            if missing:
+                await send_private(
+                    interaction,
+                    f"Choose an option for {', '.join(missing)} first.",
+                )
+                return
+            remaining = [
+                parameter
+                for parameter in self.command.parameters
+                if parameter.name not in self.selected_values
+            ]
+            if not remaining:
+                await invoke_action_command(
+                    interaction, self.command, self.selected_values
+                )
+            else:
+                await interaction.response.send_modal(
+                    CommandActionModal(
+                        self.owner_id,
+                        self.command,
+                        values=self.selected_values,
+                    )
+                )
+
+        continue_button.callback = continue_action
+        self.add_item(continue_button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await send_private(
+                interaction, "Only the user who opened this menu can use it."
+            )
+            return False
+        return True
+
+
+class ContinueActionView(discord.ui.View):
+    def __init__(self, owner_id: int, state_id: str):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.state_id = state_id
+        button = discord.ui.Button(
+            label="Continue",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"robellank-action-continue:{state_id}",
+        )
+
+        async def continue_form(interaction: discord.Interaction) -> None:
+            state = PENDING_ACTIONS.get(self.state_id)
+            if state is None:
+                await send_private(interaction, "This form has expired. Start again from the menu.")
+                return
+            if datetime.now(UTC) > state["expires_at"]:
+                PENDING_ACTIONS.pop(self.state_id, None)
+                await send_private(interaction, "This form has expired. Start again from the menu.")
+                return
+            await interaction.response.send_modal(
+                CommandActionModal(
+                    self.owner_id,
+                    state["command"],
+                    values=state["values"],
+                    state_id=self.state_id,
+                )
+            )
+
+        button.callback = continue_form
+        self.add_item(button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await send_private(
+                interaction, "Only the user who started this form can continue."
+            )
+            return False
+        return True
+
+    async def on_timeout(self) -> None:
+        PENDING_ACTIONS.pop(self.state_id, None)
+
+
+class CommandActionModal(discord.ui.Modal):
+    PAGE_SIZE = 5
+    PARAGRAPH_FIELDS = {"content", "description", "evidence", "reason", "note"}
+
+    def __init__(
+        self,
+        owner_id: int,
+        command: app_commands.Command,
+        *,
+        values: dict[str, object] | None = None,
+        state_id: str | None = None,
+    ):
+        super().__init__(title=command.qualified_name[:45], timeout=300)
+        self.owner_id = owner_id
+        self.command = command
+        self.values = dict(values or {})
+        self.state_id = state_id
+        self.parameters = [
+            parameter
+            for parameter in command.parameters
+            if parameter.name not in self.values
+        ]
+        self.page_parameters = self.parameters[: self.PAGE_SIZE]
+        self.inputs: dict[str, discord.ui.TextInput] = {}
+
+        for parameter in self.page_parameters:
+            placeholder = parameter.description[:100]
+            if parameter.choices:
+                choices = ", ".join(choice.name for choice in parameter.choices)
+                placeholder = f"Options: {choices}"[:100]
+            field = discord.ui.TextInput(
+                label=parameter.name.replace("_", " ").title()[:45],
+                placeholder=placeholder,
+                required=parameter.required,
+                default=None if parameter.required else "",
+                max_length=4000 if parameter.name in self.PARAGRAPH_FIELDS else 100,
+                style=(
+                    discord.TextStyle.paragraph
+                    if parameter.name in self.PARAGRAPH_FIELDS
+                    else discord.TextStyle.short
+                ),
+            )
+            self.inputs[parameter.name] = field
+            self.add_item(field)
+
+    async def resolve_member(
+        self, interaction: discord.Interaction, raw_value: str
+    ) -> discord.Member:
+        match = re.fullmatch(r"(?:<@!?(\d+)>|(\d+))", raw_value.strip())
+        if not match or interaction.guild is None:
+            raise ValueError("Enter a valid server member mention or ID.")
+        member_id = int(match.group(1) or match.group(2))
+        member = interaction.guild.get_member(member_id)
+        if member is None:
+            member = await interaction.guild.fetch_member(member_id)
+        return member
+
+    async def parse_value(
+        self,
+        interaction: discord.Interaction,
+        parameter: app_commands.Parameter,
+        raw_value: str,
+    ) -> object:
+        if parameter.choices:
+            selected = next(
+                (
+                    choice
+                    for choice in parameter.choices
+                    if raw_value.casefold()
+                    in {choice.name.casefold(), str(choice.value).casefold()}
+                ),
+                None,
+            )
+            if selected is None:
+                raise ValueError(
+                    f"Choose one of: {', '.join(choice.name for choice in parameter.choices)}."
+                )
+            return app_commands.Choice(name=selected.name, value=selected.value)
+
+        if parameter.type == discord.AppCommandOptionType.user:
+            return await self.resolve_member(interaction, raw_value)
+        if parameter.type == discord.AppCommandOptionType.integer:
+            value: object = int(raw_value.replace(",", ""))
+        elif parameter.type == discord.AppCommandOptionType.number:
+            value = float(raw_value.replace(",", ""))
+        elif parameter.type == discord.AppCommandOptionType.boolean:
+            normalized = raw_value.casefold()
+            if normalized not in {"true", "false", "yes", "no"}:
+                raise ValueError("Enter true or false.")
+            value = normalized in {"true", "yes"}
+        else:
+            return raw_value
+
+        metadata = parameter._Parameter__parent
+        minimum = metadata.min_value
+        maximum = metadata.max_value
+        if minimum is not None and value < minimum:
+            raise ValueError(f"{parameter.name.replace('_', ' ').title()} is too small.")
+        if maximum is not None and value > maximum:
+            raise ValueError(f"{parameter.name.replace('_', ' ').title()} is too large.")
+        return value
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.owner_id:
+            await send_private(
+                interaction, "Only the user who opened this form can submit it."
+            )
+            return
+
+        try:
+            accumulated = dict(self.values)
+            for parameter in self.page_parameters:
+                raw_value = self.inputs[parameter.name].value.strip()
+                if not raw_value:
+                    if parameter.required:
+                        raise ValueError(
+                            f"{parameter.name.replace('_', ' ').title()} is required."
+                        )
+                    continue
+                accumulated[parameter.name] = await self.parse_value(
+                    interaction, parameter, raw_value
+                )
+
+            if len(self.page_parameters) < len(self.parameters):
+                state_id = self.state_id or uuid.uuid4().hex
+                PENDING_ACTIONS[state_id] = {
+                    "owner_id": self.owner_id,
+                    "command": self.command,
+                    "values": accumulated,
+                    "expires_at": datetime.now(UTC) + timedelta(minutes=5),
+                }
+                await interaction.response.send_message(
+                    "Continue the form to enter the remaining details.",
+                    view=ContinueActionView(self.owner_id, state_id),
+                )
+                return
+            if self.state_id:
+                PENDING_ACTIONS.pop(self.state_id, None)
+            await invoke_action_command(interaction, self.command, accumulated)
+        except ValueError as error:
+            await send_private(interaction, str(error))
+        except discord.NotFound:
+            await send_private(interaction, "That member is not in this server.")
+        except Exception:
+            logger.exception("Command action form failed")
+            await send_private(
+                interaction,
+                "The action could not be completed. Please try again or contact an administrator.",
             )
 
 
@@ -4549,16 +5230,25 @@ def organize_command_categories(tree: app_commands.CommandTree) -> None:
             name="profile", description="Account, balances, tier, history, and settings"
         ),
         "storage": app_commands.Group(
-            name="storage", description="Bank storage and item requests"
+            name="storage", description="Bank storage"
+        ),
+        "requests": app_commands.Group(
+            name="requests", description="Bank item requests"
         ),
         "savings": app_commands.Group(
-            name="savings", description="Transfers, currency, deposits, and loans"
+            name="savings", description="Currency, transfers, exchanges, and deposits"
+        ),
+        "loan": app_commands.Group(
+            name="loan", description="Loan requests, repayments, and reviews"
         ),
         "stocks": app_commands.Group(
-            name="stocks", description="Virtual stock trading and market tools"
+            name="stocks", description="Virtual stock trading and holdings"
         ),
-        "other": app_commands.Group(
-            name="other", description="Administrative bank settings and account controls"
+        "market": app_commands.Group(
+            name="market", description="Stock listings, evaluations, and announcements"
+        ),
+        "admin": app_commands.Group(
+            name="admin", description="Administrative bank settings and account controls"
         ),
     }
 
@@ -4578,7 +5268,7 @@ def organize_command_categories(tree: app_commands.CommandTree) -> None:
             "deposit": "deposit",
         },
         "stocks": {"portfolio": "portfolio"},
-        "other": {
+        "admin": {
             "mint": "mint",
             "confiscate": "confiscate",
             "freeze": "freeze",
@@ -4599,7 +5289,7 @@ def organize_command_categories(tree: app_commands.CommandTree) -> None:
     group_moves = (
         (
             "loan",
-            "savings",
+            "loan",
             "loan",
             {
                 "request": "request",
@@ -4622,8 +5312,8 @@ def organize_command_categories(tree: app_commands.CommandTree) -> None:
         ),
         (
             "bank-request",
-            "storage",
-            "bank-request",
+            "requests",
+            "requests",
             {
                 "submit": "submit",
                 "list": "list",
@@ -4647,7 +5337,7 @@ def organize_command_categories(tree: app_commands.CommandTree) -> None:
         ),
         (
             "market",
-            "stocks",
+            "market",
             "market",
             {
                 "news": "news",
@@ -4667,13 +5357,13 @@ def organize_command_categories(tree: app_commands.CommandTree) -> None:
         ),
         (
             "credit",
-            "other",
+            "admin",
             "credit",
             {"set": "set", "adjust": "adjust"},
         ),
         (
             "currency",
-            "other",
+            "admin",
             "currency",
             {
                 "create": "create",
@@ -4688,6 +5378,17 @@ def organize_command_categories(tree: app_commands.CommandTree) -> None:
         group = tree.remove_command(old_name)
         if not isinstance(group, app_commands.Group):
             raise RuntimeError(f"Cannot find command group {old_name!r}.")
+        if old_name in {"loan", "bank-request", "market"}:
+            for child in list(group.commands):
+                command = group.get_command(child.name)
+                if command is None:
+                    raise RuntimeError(
+                        f"Cannot find {child.name!r} while flattening {old_name!r}."
+                    )
+                group.remove_command(child.name)
+                command.name = aliases[child.name]
+                categories[category_name].add_command(command)
+            continue
         if old_name == "currency":
             public_list = group.get_command("list")
             if public_list is None:
@@ -4701,12 +5402,103 @@ def organize_command_categories(tree: app_commands.CommandTree) -> None:
 
     # The older tier-config group has been replaced with one interactive setting panel.
     tree.remove_command("tier-config")
-    for category in categories.values():
+    for name in ("profile", "storage", "requests", "savings", "loan", "stocks", "market", "admin"):
+        category = categories[name]
         tree.add_command(category)
+
+
+def register_menu_command_tree(tree: app_commands.CommandTree) -> None:
+    ACTION_COMMANDS_BY_PATH.clear()
+    ACTION_COMMANDS_BY_CATEGORY.clear()
+
+    for root in tree.get_commands():
+        commands = (
+            root.walk_commands()
+            if isinstance(root, app_commands.Group)
+            else [root]
+        )
+        for command in commands:
+            if isinstance(command, app_commands.Group):
+                continue
+            path = command.qualified_name
+            if path in {"help", "profile menu"}:
+                continue
+            category = path.split()[0]
+            ACTION_COMMANDS_BY_PATH[path] = command
+            ACTION_COMMANDS_BY_CATEGORY.setdefault(category, []).append(command)
+
+    for root in list(tree.get_commands()):
+        tree.remove_command(root.name)
+
+    async def open_main_menu(interaction: discord.Interaction) -> None:
+        language = await get_user_language(interaction.user.id)
+        await send_public(
+            interaction,
+            embed=build_main_menu_embed(language),
+            view=BankMenuView(interaction.user.id, language),
+            language=language,
+        )
+
+    def make_category_callback(category: str):
+        async def open_category(interaction: discord.Interaction) -> None:
+            language = await get_user_language(interaction.user.id)
+            await send_public(
+                interaction,
+                embed=build_category_embed(category, language),
+                view=CategoryActionView(interaction.user.id, language, category),
+                language=language,
+            )
+
+        return open_category
+
+    async def show_help(interaction: discord.Interaction) -> None:
+        language = await get_user_language(interaction.user.id)
+        await send_public(
+            interaction,
+            embed=build_help_embed(language),
+            language=language,
+        )
+
+    tree.add_command(
+        app_commands.Command(
+            name="menu",
+            description="Open the bank action menu",
+            callback=open_main_menu,
+        )
+    )
+
+    descriptions = {
+        "profile": "Open account, balance, tier, and history actions",
+        "storage": "Open bank storage actions",
+        "requests": "Open bank item request actions",
+        "savings": "Open transfer, deposit, and currency actions",
+        "loan": "Open loan request and repayment actions",
+        "stocks": "Open stock trading and portfolio actions",
+        "market": "Open market and stock listing actions",
+        "admin": "Open administrator bank controls",
+    }
+    for category, _ in COMMAND_CATEGORIES:
+        command = app_commands.Command(
+            name=category,
+            description=descriptions[category],
+            callback=make_category_callback(category),
+        )
+        if category == "admin":
+            app_commands.default_permissions(administrator=True)(command)
+        tree.add_command(command)
+
+    tree.add_command(
+        app_commands.Command(
+            name="help",
+            description="List available commands",
+            callback=show_help,
+        )
+    )
 
 
 organize_command_categories(bot.tree)
 configure_command_registry(bot.tree)
+register_menu_command_tree(bot.tree)
 
 
 async def main() -> None:
