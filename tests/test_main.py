@@ -113,19 +113,33 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(main.is_unscored_market_evaluation(row))
         self.assertIn("점수 미등록 · 무작위 변동", main.market_report_line(row))
 
-    def test_slash_command_groups_include_stock_table_and_admin_rumor(self):
+    def test_commands_are_grouped_into_five_categories(self):
         commands = {
             command.name: command.to_dict(main.bot.tree)
             for command in main.bot.tree.get_commands()
         }
-        market_commands = {option["name"] for option in commands["market"]["options"]}
-        stock_commands = {option["name"] for option in commands["stock"]["options"]}
-        self.assertIn("rumor", market_commands)
-        self.assertIn("table", stock_commands)
+        self.assertEqual(set(commands), {"프로필", "저장소", "저축", "주식", "기타"})
+        stock_options = {
+            option["name"]: option for option in commands["주식"]["options"]
+        }
+        market_commands = {
+            option["name"] for option in stock_options["시장"]["options"]
+        }
+        stock_commands = {
+            option["name"] for option in stock_options["거래"]["options"]
+        }
+        self.assertIn("소문", market_commands)
+        self.assertIn("시세표", stock_commands)
+        savings_options = {
+            option["name"] for option in commands["저축"]["options"]
+        }
+        self.assertIn("재화목록", savings_options)
+        self.assertTrue(all(len(command["options"]) <= 25 for command in commands.values()))
 
     def test_language_and_menu_commands_are_registered(self):
-        language = main.bot.tree.get_command("language")
-        menu = main.bot.tree.get_command("menu")
+        profile = main.bot.tree.get_command("프로필")
+        language = profile.get_command("언어")
+        menu = profile.get_command("메뉴")
 
         self.assertIsNotNone(language)
         self.assertIsNotNone(menu)
@@ -139,9 +153,57 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         view = main.BankMenuView(123456, "en")
 
         self.assertEqual(
-            [button.label for button in view.children],
+            [option.value for option in view.children[0].options],
+            ["프로필", "저장소", "저축", "주식", "기타"],
+        )
+        self.assertEqual(
+            [button.label for button in view.children[1:]],
             ["Menu", "Help", "Stocks", "Language: English"],
         )
+
+    def test_tier_benefits_use_one_command_and_select_menu(self):
+        other = main.bot.tree.get_command("기타")
+        command = other.get_command("혜택설정")
+        credit = other.get_command("신용")
+
+        self.assertIsNotNone(command)
+        self.assertFalse(isinstance(command, main.app_commands.Group))
+        self.assertEqual(len(credit.commands), 2)
+
+        settings = {
+            "platinum_loan_bonus": 100_000,
+            "vip_deposit_rate_bonus": 1.5,
+            "bronze_storage_limit": 0,
+            "silver_storage_limit": 10,
+            "gold_storage_limit": 20,
+            "platinum_storage_limit": 30,
+            "ace_storage_limit": 40,
+            "vip_storage_limit": 50,
+            "loan_term_days": 30,
+            "loan_extension_days": 7,
+            "loan_extension_limit": 2,
+        }
+        view = main.TierSettingsView(123456, "987654", settings)
+        options = view.children[0].options
+        self.assertEqual(len(options), 10)
+        self.assertIn("loan_extension", {option.value for option in options})
+
+    def test_tier_setting_values_are_validated(self):
+        self.assertEqual(
+            main.parse_tier_setting_value("vip_deposit_rate_bonus", "2.5"), 2.5
+        )
+        self.assertEqual(
+            main.parse_tier_setting_value("gold_storage_limit", "500"), 500
+        )
+        for key, raw in (
+            ("vip_deposit_rate_bonus", "101"),
+            ("gold_storage_limit", "-1"),
+            ("loan_term_days", "3651"),
+            ("loan_extension_limit", "11"),
+        ):
+            with self.subTest(key=key, raw=raw):
+                with self.assertRaises(ValueError):
+                    main.parse_tier_setting_value(key, raw)
 
     def test_account_card_uses_gold_embed_and_groups_each_currency(self):
         user = SimpleNamespace(
@@ -240,10 +302,10 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_language_setting_translates_known_messages_and_keeps_korean(self):
-        original = "계좌가 없습니다. 먼저 /register를 사용하세요."
+        original = "계좌가 없습니다. 먼저 /프로필 계좌개설을 사용하세요."
         self.assertEqual(
             translate_message(original, "en"),
-            "You do not have an account. Run /register first.",
+            "You do not have an account. Run /프로필 계좌개설 first.",
         )
         self.assertEqual(translate_message(original, "ko"), original)
 
@@ -284,8 +346,8 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ephemeral_true_calls, [])
 
     def test_market_channel_uses_text_autocomplete_and_is_admin_only(self):
-        market_group = main.bot.tree.get_command("market")
-        channel_command = market_group.get_command("channel")
+        market_group = main.bot.tree.get_command("주식").get_command("시장")
+        channel_command = market_group.get_command("공지채널")
         channel_option = next(
             option
             for option in channel_command.to_dict(main.bot.tree)["options"]
@@ -300,16 +362,19 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(channel_command.checks), 1)
 
     def test_admin_commands_are_labeled_and_restricted_in_discord(self):
-        mint = main.bot.tree.get_command("mint")
-        credit = main.bot.tree.get_command("credit")
-        credit_adjust = credit.get_command("adjust")
+        other = main.bot.tree.get_command("기타")
+        mint = other.get_command("지급")
+        credit = other.get_command("신용")
+        credit_adjust = credit.get_command("사유조정")
+        benefits = other.get_command("혜택설정")
 
         self.assertTrue(mint.description.startswith(main.ADMIN_DESCRIPTION_PREFIX))
-        self.assertTrue(mint.default_permissions.administrator)
+        self.assertTrue(other.default_permissions.administrator)
         self.assertTrue(credit.default_permissions.administrator)
         self.assertTrue(
             credit_adjust.description.startswith(main.ADMIN_DESCRIPTION_PREFIX)
         )
+        self.assertTrue(benefits.description.startswith(main.ADMIN_DESCRIPTION_PREFIX))
 
 
 if __name__ == "__main__":

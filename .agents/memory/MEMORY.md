@@ -1,2 +1,3 @@
 - [Drizzle push rename prompts](drizzle-push-rename-prompts.md) — same-type column replacement can still trigger a TTY prompt despite `--force`; stage schema additions and removals separately.
 - [`.replit` validation](dot-replit-validation.md) — workflow config changes must go through the validated replacement helper, not direct file edits.
+- [discord.py group command removal](discord-command-group-removal.md) — `Group.remove_command` may mutate the tree but return `None`; retrieve the child first.

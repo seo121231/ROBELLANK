@@ -26,15 +26,14 @@ logger = logging.getLogger("robellank-bankbot")
 pool: asyncpg.Pool
 
 ADMIN_DESCRIPTION_PREFIX = "관리자 전용 · "
-ADMIN_ONLY_GROUPS = {"credit", "tier-config"}
 BANK_GOLD = 0xD7B43B
-MIXED_GROUP_DESCRIPTIONS = {
-    "loan": "대출 신청·상환·조회 (심사 하위 명령은 관리자 전용)",
-    "currency": "재화·환율·이자 (설정 하위 명령은 관리자 전용)",
-    "vault": "은행 보관 아이템 (입고·반환은 관리자 전용)",
-    "bank-request": "은행 아이템 의뢰 (처리 하위 명령은 관리자 전용)",
-    "market": "가상주식·시장 공지 (운영 하위 명령은 관리자 전용)",
-}
+COMMAND_CATEGORIES = (
+    ("profile", "Accounts, balances, tier, history, and language"),
+    ("storage", "Bank storage and item requests"),
+    ("savings", "Currency list, transfers, exchanges, deposits, and loans"),
+    ("stocks", "Virtual stock trading, holdings, and market tools"),
+    ("other", "Administrative currency, account, credit, and tier settings"),
+)
 
 
 def require_discord_token() -> str:
@@ -48,6 +47,20 @@ def require_discord_token() -> str:
 
 def configure_command_registry(tree: app_commands.CommandTree) -> None:
     for command in tree.walk_commands():
+        if isinstance(command, app_commands.Group):
+            descendants = list(command.walk_commands())
+            leaf_commands = [
+                descendant
+                for descendant in descendants
+                if not isinstance(descendant, app_commands.Group)
+            ]
+            if leaf_commands and all(leaf.checks for leaf in leaf_commands):
+                description = command.description.removeprefix("관리자:").strip()
+                command.description = (
+                    ADMIN_DESCRIPTION_PREFIX + description[:85]
+                )
+                app_commands.default_permissions(administrator=True)(command)
+            continue
         if not getattr(command, "checks", ()):
             continue
 
@@ -60,20 +73,6 @@ def configure_command_registry(tree: app_commands.CommandTree) -> None:
                 ADMIN_DESCRIPTION_PREFIX + description[:max_detail_length]
             )
 
-        if command.parent is None:
-            app_commands.default_permissions(administrator=True)(command)
-
-    for group_name in ADMIN_ONLY_GROUPS:
-        group = tree.get_command(group_name)
-        if isinstance(group, app_commands.Group):
-            description = group.description.removeprefix("관리자:").strip()
-            group.description = ADMIN_DESCRIPTION_PREFIX + description[:85]
-            app_commands.default_permissions(administrator=True)(group)
-
-    for group_name, description in MIXED_GROUP_DESCRIPTIONS.items():
-        group = tree.get_command(group_name)
-        if isinstance(group, app_commands.Group):
-            group.description = description
 
 
 TIERS = [
@@ -182,7 +181,7 @@ async def account(
         user_id,
     )
     if not row:
-        raise ValueError("계좌가 없습니다. 먼저 /register를 사용하세요.")
+        raise ValueError("계좌가 없습니다. 먼저 /profile register를 사용하세요.")
     if row["frozen"] and not allow_frozen:
         raise ValueError("계좌가 동결되어 거래할 수 없습니다. 관리자에게 문의하세요.")
     return row
@@ -491,17 +490,13 @@ def build_account_embed(
     description_lines = []
     if frozen:
         description_lines.append(
-            "🔒 This account is frozen." if english else "🔒 동결된 계좌입니다."
+            "This account is frozen." if english else "동결된 계좌입니다."
         )
 
     for row in rows[:24]:
         symbol = trim_embed_text(row["symbol"], 20)
         currency_name = trim_embed_text(row["name"], 100)
-        label = (
-            f"🪙 {currency_name} · {symbol}"
-            if row["is_base"]
-            else f"🏦 {currency_name} · {symbol}"
-        )
+        label = f"{currency_name} · {symbol}"
         wallet_label = "Wallet" if english else "지갑"
         savings_label = "Savings" if english else "예금"
         embed.add_field(
@@ -687,25 +682,22 @@ async def move_deposit(
     await send_private(interaction, f"{fmt(amount)} {currency_row['symbol']}을 {note}")
 
 
-@bot.tree.command(name="deposit", description="지갑에서 예금으로 옮깁니다")
-async def deposit(
+@bot.tree.command(name="deposit", description="예금과 지갑 사이에서 재화를 이동합니다")
+@app_commands.choices(
+    direction=[
+        app_commands.Choice(name="Deposit", value="deposit"),
+        app_commands.Choice(name="Withdraw", value="withdraw"),
+    ]
+)
+async def savings_move(
     interaction: discord.Interaction,
+    direction: app_commands.Choice[str],
     currency: str,
     amount: app_commands.Range[int, 1, 2147483647],
 ) -> None:
     await safe_command(
-        interaction, lambda: move_deposit(interaction, currency, amount, "deposit")
-    )
-
-
-@bot.tree.command(name="withdraw", description="예금에서 지갑으로 옮깁니다")
-async def withdraw(
-    interaction: discord.Interaction,
-    currency: str,
-    amount: app_commands.Range[int, 1, 2147483647],
-) -> None:
-    await safe_command(
-        interaction, lambda: move_deposit(interaction, currency, amount, "withdraw")
+        interaction,
+        lambda: move_deposit(interaction, currency, amount, direction.value),
     )
 
 
@@ -1002,7 +994,7 @@ async def stock_list(interaction: discord.Interaction) -> None:
                 inline=False,
             )
         embed.set_footer(
-            text=f"총 {len(rows)}종목 · 자세한 내용은 /stock quote"
+            text=f"총 {len(rows)}종목 · 자세한 내용은 /stocks stock quote"
             if len(rows) <= 24
             else f"총 {len(rows)}종목 · 목록에는 이름순 24종목 표시"
         )
@@ -1548,70 +1540,47 @@ async def help_command(interaction: discord.Interaction) -> None:
     await send_public(
         interaction,
         embed=build_help_embed(language),
-        view=BankMenuView(interaction.user.id, language),
         language=language,
     )
 
 
 def build_help_embed(language: str) -> discord.Embed:
-    english = language == "en"
-    embed = discord.Embed(
-        title="ROBELLANK Bank Bot Help" if english else "ROBELLANK 은행 봇 도움말",
+    lines = ["/help"]
+    for category_name, _ in COMMAND_CATEGORIES:
+        root = bot.tree.get_command(category_name)
+        if not isinstance(root, app_commands.Group):
+            continue
+        for command in root.walk_commands():
+            if isinstance(command, app_commands.Group):
+                continue
+            path = f"/{command.qualified_name}"
+            parameters = [
+                f"<{option['name']}>" if option.get("required") else f"[{option['name']}]"
+                for option in command.to_dict(bot.tree).get("options", [])
+            ]
+            lines.append(" ".join([path, *parameters]))
+        lines.append("")
+    return discord.Embed(
+        description="\n".join(lines).rstrip(),
         color=BANK_GOLD,
     )
-    embed.description = (
-        "Commands are grouped into user and administrator sections below. "
-        "Administrator-only commands require server administrator permissions.\n\n"
-        "Rumors are unverified posts written by server staff. Game currency and tier roles "
-        "are verified and managed by administrators."
-        if english
-        else "아래에서 일반 이용자 명령과 관리자 전용 명령을 구분했습니다. "
-        "`관리자 전용` 표기가 있는 명령은 서버 관리자만 사용할 수 있습니다.\n\n"
-        "찌라시는 운영진 작성 미확인 정보이며 사실 여부와 투자 결과를 보장하지 않습니다. "
-        "게임 재화는 사용자가 직접 등록하지 않으며, 관리자가 게임에서 확인한 뒤 지급합니다. "
-        "등급 역할도 관리자가 직접 부여하며 봇은 역할을 변경하지 않습니다."
-    )
-    leaf_commands = [
-        command
-        for command in bot.tree.walk_commands()
+
+
+def build_category_embed(category_name: str, language: str) -> discord.Embed:
+    root = bot.tree.get_command(category_name)
+    if not isinstance(root, app_commands.Group):
+        raise ValueError("명령 범주를 찾을 수 없습니다.")
+    lines = [
+        f"/{command.qualified_name} — "
+        f"{translate_known_text(command.description, language)}"
+        for command in root.walk_commands()
         if not isinstance(command, app_commands.Group)
     ]
-    public_commands = [command for command in leaf_commands if not command.checks]
-    admin_commands = [command for command in leaf_commands if command.checks]
-
-    def add_command_fields(title: str, commands: list[app_commands.Command]) -> None:
-        lines = [
-            f"/{command.qualified_name} — "
-            f"{translate_known_text(command.description, language)}"
-            for command in commands
-        ]
-        chunks: list[list[str]] = []
-        current: list[str] = []
-        current_length = 0
-        for line in lines:
-            line_length = len(line) + (1 if current else 0)
-            if current and current_length + line_length > 1000:
-                chunks.append(current)
-                current = []
-                current_length = 0
-                line_length = len(line)
-            current.append(line)
-            current_length += line_length
-        if current:
-            chunks.append(current)
-
-        for index, chunk in enumerate(chunks):
-            field_name = title if index == 0 else f"{title} (continued)"
-            embed.add_field(name=field_name, value="\n".join(chunk), inline=False)
-
-    add_command_fields(
-        "User commands" if english else "일반 이용자 명령어", public_commands
+    return discord.Embed(
+        title=category_name,
+        description="\n".join(lines) or "표시할 명령이 없습니다.",
+        color=BANK_GOLD,
     )
-    add_command_fields(
-        "Administrator commands" if english else "관리자 전용 명령어",
-        admin_commands,
-    )
-    return embed
 
 
 def build_main_menu_embed(language: str) -> discord.Embed:
@@ -1619,16 +1588,17 @@ def build_main_menu_embed(language: str) -> discord.Embed:
         return discord.Embed(
             title="ROBELLANK Bank",
             description=(
-                "Use the buttons below to open help, browse listed stocks, or switch "
-                "your language. Your language choice is saved to your Discord account."
+                "Choose a category from the menu below to see its commands. You can also "
+                "open help, browse stocks, or switch languages. Your language choice is "
+                "saved to your Discord account."
             ),
             color=BANK_GOLD,
         )
     return discord.Embed(
         title="ROBELLANK 은행",
         description=(
-            "아래 버튼으로 도움말을 열고, 상장 종목을 보거나, 표시 언어를 바꿀 수 있습니다. "
-            "언어 설정은 디스코드 사용자별로 저장됩니다."
+            "아래 범주 선택 메뉴에서 각 기능과 명령을 확인할 수 있습니다. "
+            "도움말, 주식 목록, 표시 언어도 여기서 바꿀 수 있습니다."
         ),
         color=BANK_GOLD,
     )
@@ -1673,7 +1643,7 @@ def build_stock_list_embed(
     if english:
         embed.set_footer(text=f"{len(rows)} listed stocks")
     else:
-        embed.set_footer(text=f"총 {len(rows)}종목 · 자세한 내용은 /stock quote")
+        embed.set_footer(text=f"총 {len(rows)}종목 · 자세한 내용은 /stocks stock quote")
     return embed
 
 
@@ -1681,6 +1651,25 @@ class BankMenuView(discord.ui.View):
     def __init__(self, owner_id: int, language: str):
         super().__init__(timeout=300)
         self.owner_id = owner_id
+        english = language == "en"
+        category_labels = {name: name.title() for name, _ in COMMAND_CATEGORIES}
+        category_select = discord.ui.Select(
+            placeholder="Choose a category" if english else "명령 범주 선택",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(label=category_labels[name], value=name)
+                for name, _ in COMMAND_CATEGORIES
+            ],
+        )
+
+        async def select_category(interaction: discord.Interaction) -> None:
+            await self.handle_action(
+                interaction, f"category:{category_select.values[0]}"
+            )
+
+        category_select.callback = select_category
+        self.add_item(category_select)
         labels = (
             [
                 ("menu", "Menu", discord.ButtonStyle.secondary),
@@ -1732,11 +1721,19 @@ class BankMenuView(discord.ui.View):
             elif action == "stocks":
                 rows = await list_stocks(require_guild(interaction))
                 embed = build_stock_list_embed(rows, language)
+            elif action.startswith("category:"):
+                embed = build_category_embed(
+                    action.removeprefix("category:"), language
+                )
             else:
                 embed = build_main_menu_embed(language)
             await interaction.response.edit_message(
                 embed=localize_embed(embed, language),
-                view=BankMenuView(interaction.user.id, language),
+                view=(
+                    None
+                    if action == "help"
+                    else BankMenuView(interaction.user.id, language)
+                ),
             )
         except Exception:
             logger.exception("Bank menu action failed")
@@ -2866,9 +2863,6 @@ async def supply(interaction: discord.Interaction, currency: str) -> None:
     await safe_command(interaction, run)
 
 
-tier_config_group = app_commands.Group(
-    name="tier-config", description="관리자: 등급 혜택을 설정합니다"
-)
 TIER_SETTING_COLUMNS = {
     "platinum_loan_bonus": "platinum_loan_bonus",
     "vip_deposit_rate_bonus": "vip_deposit_rate_bonus",
@@ -2882,167 +2876,326 @@ TIER_SETTING_COLUMNS = {
     "loan_extension_days": "loan_extension_days",
     "loan_extension_limit": "loan_extension_limit",
 }
+TIER_SETTING_LABELS = {
+    "platinum_loan_bonus": "플래티넘 이상 신용대출 추가 한도",
+    "vip_deposit_rate_bonus": "VIP 예금 추가 일일 이자율",
+    "bronze_storage_limit": "브론즈 보관 한도",
+    "silver_storage_limit": "실버 보관 한도",
+    "gold_storage_limit": "골드 보관 한도",
+    "platinum_storage_limit": "플래티넘 보관 한도",
+    "ace_storage_limit": "에이스 보관 한도",
+    "vip_storage_limit": "VIP 보관 한도",
+    "loan_term_days": "신규 대출 기본 기간",
+    "loan_extension": "대출 연장 기간과 횟수",
+}
 
 
-async def set_tier_setting(
-    guild_id: str, actor_id: str, key: str, value: int | float, reason: str
+async def load_tier_settings(guild_id: str) -> asyncpg.Record:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO bank_tier_settings (guild_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            guild_id,
+        )
+        return await conn.fetchrow(
+            f"SELECT {','.join(TIER_SETTING_COLUMNS.values())} "
+            "FROM bank_tier_settings WHERE guild_id=$1",
+            guild_id,
+        )
+
+
+async def set_tier_settings(
+    guild_id: str,
+    actor_id: str,
+    values: dict[str, int | float],
+    reason: str,
 ) -> None:
-    column = TIER_SETTING_COLUMNS[key]
+    if not values or any(key not in TIER_SETTING_COLUMNS for key in values):
+        raise ValueError("등급 혜택 설정 항목을 확인할 수 없습니다.")
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
                 "INSERT INTO bank_tier_settings (guild_id) VALUES ($1) ON CONFLICT DO NOTHING",
                 guild_id,
             )
-            old_value = await conn.fetchval(
-                f"SELECT {column} FROM bank_tier_settings WHERE guild_id=$1", guild_id
+            for key, value in values.items():
+                column = TIER_SETTING_COLUMNS[key]
+                old_value = await conn.fetchval(
+                    f"SELECT {column} FROM bank_tier_settings WHERE guild_id=$1",
+                    guild_id,
+                )
+                await conn.execute(
+                    f"UPDATE bank_tier_settings SET {column}=$1,created_at=now() WHERE guild_id=$2",
+                    value,
+                    guild_id,
+                )
+                await conn.execute(
+                    """INSERT INTO bank_tier_setting_history
+                         (guild_id,actor_discord_user_id,setting_key,old_value,new_value,reason)
+                       VALUES ($1,$2,$3,$4,$5,$6)""",
+                    guild_id,
+                    actor_id,
+                    key,
+                    str(old_value),
+                    str(value),
+                    reason,
+                )
+
+
+def tier_setting_display(key: str, settings: dict[str, object]) -> str:
+    if key == "loan_extension":
+        return (
+            f"{fmt(settings['loan_extension_days'])}일씩 "
+            f"최대 {fmt(settings['loan_extension_limit'])}회"
+        )
+    value = settings[key]
+    if key == "vip_deposit_rate_bonus":
+        return f"{value}%p"
+    if key.endswith("_storage_limit"):
+        return f"{fmt(value)}개"
+    if key == "platinum_loan_bonus":
+        return f"{fmt(value)}벨"
+    if key == "loan_term_days":
+        return f"{fmt(value)}일"
+    return str(value)
+
+
+def tier_setting_select_options(
+    settings: dict[str, object],
+) -> list[discord.SelectOption]:
+    return [
+        discord.SelectOption(
+            label=TIER_SETTING_LABELS[key],
+            value=key,
+            description=f"현재 설정: {tier_setting_display(key, settings)}",
+        )
+        for key in TIER_SETTING_LABELS
+    ]
+
+
+def parse_tier_setting_value(key: str, raw_value: str) -> int | float:
+    try:
+        value: int | float
+        if key == "vip_deposit_rate_bonus":
+            value = float(raw_value.strip())
+            if not math.isfinite(value):
+                raise ValueError
+        else:
+            value = int(raw_value.strip())
+    except (TypeError, ValueError):
+        raise ValueError("숫자 형식으로 입력해 주세요.") from None
+
+    if key == "vip_deposit_rate_bonus":
+        minimum, maximum = 0, 100
+    elif key.endswith("_storage_limit") or key == "platinum_loan_bonus":
+        minimum, maximum = 0, 2_147_483_647
+    elif key == "loan_term_days" or key == "loan_extension_days":
+        minimum, maximum = 0, 3650
+    elif key == "loan_extension_limit":
+        minimum, maximum = 0, 10
+    else:
+        raise ValueError("등급 혜택 설정 항목을 확인할 수 없습니다.")
+    if not minimum <= value <= maximum:
+        raise ValueError(f"허용 범위는 {minimum}~{maximum}입니다.")
+    return value
+
+
+def build_tier_settings_embed(settings: dict[str, object]) -> discord.Embed:
+    lines = [
+        f"{TIER_SETTING_LABELS[key]}: {tier_setting_display(key, settings)}"
+        for key in TIER_SETTING_LABELS
+    ]
+    return discord.Embed(
+        title="등급별 혜택 설정",
+        description=(
+            "아래 선택 메뉴에서 바꿀 항목을 고르면 입력 창이 열립니다. "
+            "저장 내용은 변경 이력에 기록됩니다.\n\n" + "\n".join(lines)
+        ),
+        color=BANK_GOLD,
+    )
+
+
+class TierSettingModal(discord.ui.Modal):
+    def __init__(
+        self,
+        owner_id: int,
+        guild_id: str,
+        key: str,
+        settings: dict[str, object],
+    ):
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+        self.key = key
+        super().__init__(title=TIER_SETTING_LABELS[key])
+
+        self.value_input: discord.ui.TextInput | None = None
+        self.days_input: discord.ui.TextInput | None = None
+        self.limit_input: discord.ui.TextInput | None = None
+        if key == "loan_extension":
+            self.days_input = discord.ui.TextInput(
+                label="1회 연장 일수 (0~3650)",
+                default=str(settings["loan_extension_days"]),
+                min_length=1,
+                max_length=4,
             )
-            await conn.execute(
-                f"UPDATE bank_tier_settings SET {column}=$1,created_at=now() WHERE guild_id=$2",
-                value,
-                guild_id,
+            self.limit_input = discord.ui.TextInput(
+                label="최대 연장 횟수 (0~10)",
+                default=str(settings["loan_extension_limit"]),
+                min_length=1,
+                max_length=2,
             )
-            await conn.execute(
-                """INSERT INTO bank_tier_setting_history
-                     (guild_id,actor_discord_user_id,setting_key,old_value,new_value,reason)
-                   VALUES ($1,$2,$3,$4,$5,$6)""",
-                guild_id,
-                actor_id,
-                key,
-                str(old_value),
-                str(value),
+            self.add_item(self.days_input)
+            self.add_item(self.limit_input)
+        else:
+            setting_key = key
+            self.value_input = discord.ui.TextInput(
+                label=TIER_SETTING_LABELS[key],
+                default=str(settings[setting_key]),
+                min_length=1,
+                max_length=16 if key == "vip_deposit_rate_bonus" else 10,
+            )
+            self.add_item(self.value_input)
+        self.reason_input = discord.ui.TextInput(
+            label="변경 사유 (선택)",
+            required=False,
+            max_length=300,
+            style=discord.TextStyle.paragraph,
+        )
+        self.add_item(self.reason_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        permissions = getattr(interaction.user, "guild_permissions", None)
+        if (
+            interaction.user.id != self.owner_id
+            or str(interaction.guild_id or "") != self.guild_id
+            or not permissions
+            or not permissions.administrator
+        ):
+            await interaction.response.send_message(
+                "서버 관리자만 설정을 저장할 수 있습니다.",
+            )
+            return
+
+        try:
+            if self.key == "loan_extension":
+                if self.days_input is None or self.limit_input is None:
+                    raise ValueError("입력 항목을 확인할 수 없습니다.")
+                values = {
+                    "loan_extension_days": parse_tier_setting_value(
+                        "loan_extension_days", self.days_input.value
+                    ),
+                    "loan_extension_limit": parse_tier_setting_value(
+                        "loan_extension_limit", self.limit_input.value
+                    ),
+                }
+            else:
+                if self.value_input is None:
+                    raise ValueError("입력 항목을 확인할 수 없습니다.")
+                values = {
+                    self.key: parse_tier_setting_value(
+                        self.key, self.value_input.value
+                    )
+                }
+            reason = self.reason_input.value.strip() or "관리자 등급 혜택 설정"
+            await set_tier_settings(
+                self.guild_id,
+                str(interaction.user.id),
+                values,
                 reason,
             )
+        except ValueError as error:
+            await interaction.response.send_message(str(error))
+            return
+        except asyncpg.PostgresError:
+            logger.exception("Tier settings update failed")
+            await interaction.response.send_message(
+                "데이터베이스 문제로 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.",
+            )
+            return
+
+        if self.key == "loan_extension":
+            confirmation = (
+                f"대출 연장 기준을 {values['loan_extension_days']}일씩 "
+                f"최대 {values['loan_extension_limit']}회로 저장했습니다."
+            )
+        else:
+            value = next(iter(values.values()))
+            confirmation = (
+                f"{TIER_SETTING_LABELS[self.key]}을(를) "
+                f"{tier_setting_display(self.key, {**values, **{self.key: value}})}로 저장했습니다."
+            )
+        await interaction.response.send_message(confirmation)
 
 
-@tier_config_group.command(
-    name="limit", description="플래티넘 이상 신용대출 추가 한도(벨)를 설정합니다"
+class TierSettingsView(discord.ui.View):
+    def __init__(
+        self,
+        owner_id: int,
+        guild_id: str,
+        settings: dict[str, object],
+    ):
+        super().__init__(timeout=600)
+        self.owner_id = owner_id
+        self.guild_id = guild_id
+        self.settings = settings
+        selector = discord.ui.Select(
+            placeholder="설정할 혜택을 선택하세요",
+            min_values=1,
+            max_values=1,
+            options=tier_setting_select_options(settings),
+        )
+
+        async def open_setting(interaction: discord.Interaction) -> None:
+            key = selector.values[0]
+            current = await load_tier_settings(self.guild_id)
+            await interaction.response.send_modal(
+                TierSettingModal(
+                    self.owner_id,
+                    self.guild_id,
+                    key,
+                    dict(current),
+                )
+            )
+
+        selector.callback = open_setting
+        self.add_item(selector)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if (
+            interaction.user.id != self.owner_id
+            or str(interaction.guild_id or "") != self.guild_id
+        ):
+            await interaction.response.send_message(
+                "이 설정 화면을 연 관리자만 사용할 수 있습니다.",
+            )
+            return False
+        permissions = getattr(interaction.user, "guild_permissions", None)
+        if not permissions or not permissions.administrator:
+            await interaction.response.send_message(
+                "서버 관리자만 설정을 변경할 수 있습니다.",
+            )
+            return False
+        return True
+
+
+@bot.tree.command(
+    name="tier-benefits", description="관리자: 한 화면에서 등급별 혜택을 설정합니다"
 )
 @app_commands.checks.has_permissions(administrator=True)
-async def tier_limit(
-    interaction: discord.Interaction, bonus: app_commands.Range[int, 0, 2147483647]
-) -> None:
-    async def run():
-        await set_tier_setting(
-            require_guild(interaction),
-            str(interaction.user.id),
-            "platinum_loan_bonus",
-            bonus,
-            "관리자 등급 혜택 설정",
-        )
-        await send_private(
-            interaction,
-            f"플래티넘 이상 신용대출 추가 한도를 {fmt(bonus)}벨로 설정했습니다.",
-        )
-
-    await safe_command(interaction, run)
-
-
-@tier_config_group.command(
-    name="interest", description="VIP 예금 추가 일일 이자율을 설정합니다"
-)
-@app_commands.checks.has_permissions(administrator=True)
-async def tier_interest(
-    interaction: discord.Interaction, rate: app_commands.Range[float, 0.0, 100.0]
-) -> None:
-    async def run():
-        await set_tier_setting(
-            require_guild(interaction),
-            str(interaction.user.id),
-            "vip_deposit_rate_bonus",
-            rate,
-            "관리자 등급 혜택 설정",
-        )
-        await send_private(
-            interaction, f"VIP 예금 추가 일일 이자율을 {rate}%p로 설정했습니다."
-        )
-
-    await safe_command(interaction, run)
-
-
-@tier_config_group.command(
-    name="storage", description="등급별 은행 아이템 보관 한도를 설정합니다"
-)
-@app_commands.checks.has_permissions(administrator=True)
-@app_commands.choices(
-    tier=[app_commands.Choice(name=label, value=key) for key, label, _, _ in TIERS]
-)
-async def tier_storage(
-    interaction: discord.Interaction,
-    tier: app_commands.Choice[str],
-    capacity: app_commands.Range[int, 0, 2147483647],
-) -> None:
-    async def run():
-        await set_tier_setting(
-            require_guild(interaction),
-            str(interaction.user.id),
-            f"{tier.value}_storage_limit",
-            capacity,
-            "관리자 등급 혜택 설정",
-        )
-        await send_private(
-            interaction,
-            f"{TIER_NAME[tier.value]} 보관 한도를 {fmt(capacity)}개로 설정했습니다.",
-        )
-
-    await safe_command(interaction, run)
-
-
-@tier_config_group.command(
-    name="loan-term", description="신규 대출 기본 기간을 설정합니다(일, 0=기간 없음)"
-)
-@app_commands.checks.has_permissions(administrator=True)
-async def tier_loan_term(
-    interaction: discord.Interaction, days: app_commands.Range[int, 0, 3650]
-) -> None:
-    async def run():
-        await set_tier_setting(
-            require_guild(interaction),
-            str(interaction.user.id),
-            "loan_term_days",
-            days,
-            "관리자 등급 혜택 설정",
-        )
-        await send_private(
-            interaction, f"신규 대출 기본 기간을 {days}일로 설정했습니다."
-        )
-
-    await safe_command(interaction, run)
-
-
-@tier_config_group.command(
-    name="extension", description="대출 연장 일수와 횟수를 설정합니다"
-)
-@app_commands.checks.has_permissions(administrator=True)
-async def tier_extension(
-    interaction: discord.Interaction,
-    days: app_commands.Range[int, 0, 3650],
-    limit: app_commands.Range[int, 0, 10],
-) -> None:
-    async def run():
+async def tier_settings_command(interaction: discord.Interaction) -> None:
+    try:
         guild_id = require_guild(interaction)
-        await set_tier_setting(
-            guild_id,
-            str(interaction.user.id),
-            "loan_extension_days",
-            days,
-            "관리자 대출 연장 설정",
+        settings = dict(await load_tier_settings(guild_id))
+        await interaction.response.send_message(
+            embed=build_tier_settings_embed(settings),
+            view=TierSettingsView(interaction.user.id, guild_id, settings),
         )
-        await set_tier_setting(
-            guild_id,
-            str(interaction.user.id),
-            "loan_extension_limit",
-            limit,
-            "관리자 대출 연장 설정",
+    except ValueError as error:
+        await interaction.response.send_message(str(error))
+    except asyncpg.PostgresError:
+        logger.exception("Tier settings panel failed to load")
+        await interaction.response.send_message(
+            "데이터베이스 문제로 설정을 불러오지 못했습니다.",
         )
-        await send_private(
-            interaction, f"대출 1회 연장 기간 {days}일 · 최대 {limit}회로 설정했습니다."
-        )
-
-    await safe_command(interaction, run)
-
-
-bot.tree.add_command(tier_config_group)
 
 
 vault_group = app_commands.Group(name="vault", description="은행 보관 아이템")
@@ -3461,7 +3614,7 @@ async def market_rumor(
             "운영진 작성 찌라시이며, 사실 여부와 투자 결과는 보장되지 않습니다."
         )
         posted = (
-            f"📣 **[찌라시 · {category} · 미확인] {clean_title}**\n"
+            f"**[찌라시 · {category} · 미확인] {clean_title}**\n"
             f"{'**관련 종목:** ' + resolved_stock_name + chr(10) if resolved_stock_name else ''}"
             f"{clean_content}\n\n*{disclaimer}*"
         )
@@ -4376,6 +4529,183 @@ async def before_scheduled_tasks() -> None:
     await bot.wait_until_ready()
 
 
+def rename_group_commands(
+    group: app_commands.Group, aliases: dict[str, str]
+) -> None:
+    for old_name, new_name in aliases.items():
+        command = group.get_command(old_name)
+        if command is None:
+            raise RuntimeError(
+                f"Cannot find {old_name!r} while organizing {group.name!r}."
+            )
+        group.remove_command(old_name)
+        command.name = new_name
+        group.add_command(command)
+
+
+def organize_command_categories(tree: app_commands.CommandTree) -> None:
+    categories = {
+        "profile": app_commands.Group(
+            name="profile", description="Account, balances, tier, history, and settings"
+        ),
+        "storage": app_commands.Group(
+            name="storage", description="Bank storage and item requests"
+        ),
+        "savings": app_commands.Group(
+            name="savings", description="Transfers, currency, deposits, and loans"
+        ),
+        "stocks": app_commands.Group(
+            name="stocks", description="Virtual stock trading and market tools"
+        ),
+        "other": app_commands.Group(
+            name="other", description="Administrative bank settings and account controls"
+        ),
+    }
+
+    direct_commands = {
+        "profile": {
+            "register": "register",
+            "balance": "balance",
+            "tier": "tier",
+            "history": "history",
+            "leaderboard": "leaderboard",
+            "menu": "menu",
+            "language": "language",
+        },
+        "savings": {
+            "transfer": "transfer",
+            "exchange": "exchange",
+            "deposit": "deposit",
+        },
+        "stocks": {"portfolio": "portfolio"},
+        "other": {
+            "mint": "mint",
+            "confiscate": "confiscate",
+            "freeze": "freeze",
+            "unfreeze": "unfreeze",
+            "supply": "supply",
+            "tier-benefits": "tier-benefits",
+        },
+    }
+    for category_name, moves in direct_commands.items():
+        category = categories[category_name]
+        for old_name, new_name in moves.items():
+            command = tree.remove_command(old_name)
+            if command is None:
+                raise RuntimeError(f"Cannot find command {old_name!r}.")
+            command.name = new_name
+            category.add_command(command)
+
+    group_moves = (
+        (
+            "loan",
+            "savings",
+            "loan",
+            {
+                "request": "request",
+                "collateral-request": "collateral-request",
+                "list": "list",
+                "repay": "repay",
+                "extend": "extend",
+                "queue": "queue",
+                "approve": "approve",
+                "collateral-approve": "collateral-approve",
+                "reject": "reject",
+                "collateral-return": "collateral-return",
+            },
+        ),
+        (
+            "vault",
+            "storage",
+            "vault",
+            {"list": "list", "add": "add", "remove": "remove"},
+        ),
+        (
+            "bank-request",
+            "storage",
+            "bank-request",
+            {
+                "submit": "submit",
+                "list": "list",
+                "queue": "queue",
+                "update": "update",
+            },
+        ),
+        (
+            "stock",
+            "stocks",
+            "stock",
+            {
+                "list": "list",
+                "table": "table",
+                "quote": "quote",
+                "buy": "buy",
+                "sell": "sell",
+                "orders": "orders",
+                "cancel": "cancel",
+            },
+        ),
+        (
+            "market",
+            "stocks",
+            "market",
+            {
+                "news": "news",
+                "rumor": "rumor",
+                "create": "create",
+                "describe": "describe",
+                "issue": "issue",
+                "burn": "burn",
+                "remove": "remove",
+                "evaluate": "evaluate",
+                "publish": "publish",
+                "channel": "channel",
+                "note": "note",
+                "officer-add": "officer-add",
+                "officer-remove": "officer-remove",
+            },
+        ),
+        (
+            "credit",
+            "other",
+            "credit",
+            {"set": "set", "adjust": "adjust"},
+        ),
+        (
+            "currency",
+            "other",
+            "currency",
+            {
+                "create": "create",
+                "setbase": "setbase",
+                "setvalue": "setvalue",
+                "setrate": "setrate",
+                "remove": "remove",
+            },
+        ),
+    )
+    for old_name, category_name, new_name, aliases in group_moves:
+        group = tree.remove_command(old_name)
+        if not isinstance(group, app_commands.Group):
+            raise RuntimeError(f"Cannot find command group {old_name!r}.")
+        if old_name == "currency":
+            public_list = group.get_command("list")
+            if public_list is None:
+                raise RuntimeError("Cannot find the currency list command.")
+            group.remove_command("list")
+            public_list.name = "currencies"
+            categories["savings"].add_command(public_list)
+        rename_group_commands(group, aliases)
+        group.name = new_name
+        categories[category_name].add_command(group)
+
+    # The older tier-config group has been replaced with one interactive setting panel.
+    tree.remove_command("tier-config")
+    for category in categories.values():
+        tree.add_command(category)
+
+
+organize_command_categories(bot.tree)
 configure_command_registry(bot.tree)
 
 
