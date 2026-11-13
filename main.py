@@ -162,6 +162,20 @@ TIER_ORDER = {key: rank for key, _, rank, _ in TIERS}
 TIER_NAME = {key: label for key, label, _, _ in TIERS}
 TIER_ROLE = {key: role_id for key, _, _, role_id in TIERS}
 TIER_ROLE_BY_ID = {role_id: key for key, role_id in TIER_ROLE.items()}
+TIER_ROLE_TAGS = {
+    "bronze": "bronze",
+    "브론즈": "bronze",
+    "silver": "silver",
+    "실버": "silver",
+    "gold": "gold",
+    "골드": "gold",
+    "platinum": "platinum",
+    "플레티넘": "platinum",
+    "플래티넘": "platinum",
+    "ace": "ace",
+    "에이스": "ace",
+    "VIP": "vip",
+}
 TIER_ROLE_NAME_ALIASES = {
     "bronze": {"bronze", "브론즈"},
     "silver": {"silver", "실버"},
@@ -224,9 +238,19 @@ def require_guild(interaction: discord.Interaction) -> str:
 def tier_for(member: discord.abc.User | discord.Member) -> str:
     matched_tiers = []
     for role in getattr(member, "roles", []):
-        tier = TIER_ROLE_BY_ID.get(str(getattr(role, "id", "")))
-        if tier is None:
-            name = normalize_discord_role_name(getattr(role, "name", ""))
+        role_name = str(getattr(role, "name", ""))
+        bracket_tags = re.findall(r"\[([^\[\]]+)\]", role_name)
+        if bracket_tags:
+            tagged_tiers = [
+                TIER_ROLE_TAGS[tag.strip()]
+                for tag in bracket_tags
+                if tag.strip() in TIER_ROLE_TAGS
+            ]
+            tier = max(tagged_tiers, key=TIER_ORDER.__getitem__, default=None)
+        else:
+            tier = TIER_ROLE_BY_ID.get(str(getattr(role, "id", "")))
+        if tier is None and not bracket_tags:
+            name = normalize_discord_role_name(role_name)
             tier = next(
                 (
                     key

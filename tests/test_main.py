@@ -95,6 +95,32 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             "platinum",
         )
 
+    def test_bracketed_tier_tags_use_lowercase_except_uppercase_vip(self):
+        member = SimpleNamespace(
+            roles=[
+                SimpleNamespace(id=900011, name="Member [bronze]"),
+                SimpleNamespace(id=900012, name="Rank [silver]"),
+                SimpleNamespace(id=900013, name="Tier [gold]"),
+                SimpleNamespace(id=900014, name="[platinum]"),
+                SimpleNamespace(id=900015, name="[ace]"),
+            ]
+        )
+        uppercase_vip = SimpleNamespace(
+            roles=[SimpleNamespace(id=900016, name="Special [VIP]")]
+        )
+        lowercase_vip_with_legacy_id = SimpleNamespace(
+            roles=[
+                SimpleNamespace(
+                    id=int(main.TIER_ROLE["vip"]),
+                    name="Special [vip]",
+                )
+            ]
+        )
+
+        self.assertEqual(main.tier_for(member), "ace")
+        self.assertEqual(main.tier_for(uppercase_vip), "vip")
+        self.assertEqual(main.tier_for(lowercase_vip_with_legacy_id), "bronze")
+
     def test_evaluation_score_ranges(self):
         self.assertEqual(main.evaluation_change_range(0), (0, 0))
         self.assertEqual(main.evaluation_change_range(5), (1, 2))
