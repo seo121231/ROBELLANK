@@ -289,6 +289,83 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(choice_view.children[0].options), 16)
 
+    def test_every_exposed_action_has_a_callable_handler(self):
+        self.assertGreater(len(main.ACTION_COMMANDS_BY_PATH), 0)
+        for path, command in main.ACTION_COMMANDS_BY_PATH.items():
+            with self.subTest(path=path):
+                self.assertTrue(callable(command.callback))
+
+    def test_member_target_actions_open_discord_user_selectors(self):
+        target_commands = [
+            command
+            for command in main.ACTION_COMMANDS_BY_PATH.values()
+            if any(
+                parameter.type == main.discord.AppCommandOptionType.user
+                for parameter in command.parameters
+            )
+        ]
+        self.assertGreaterEqual(len(target_commands), 10)
+        for command in target_commands:
+            with self.subTest(path=command.qualified_name):
+                view = main.MemberSelectView(
+                    123456, command=command, language="ko"
+                )
+                self.assertIsInstance(view.children[0], main.discord.ui.UserSelect)
+
+    async def test_member_selection_prefills_target_fields_before_forms(self):
+        selected_member = SimpleNamespace(id=654321, display_name="Selected User")
+        response = SimpleNamespace(send_modal=AsyncMock())
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=123456),
+            response=response,
+        )
+        command = main.ACTION_COMMANDS_BY_PATH["admin freeze"]
+        view = main.MemberSelectView(
+            123456, command=command, language="ko"
+        )
+
+        await view.accept_member(interaction, selected_member)
+
+        response.send_modal.assert_awaited_once()
+        modal = response.send_modal.await_args.args[0]
+        self.assertIsInstance(modal, main.CommandActionModal)
+        self.assertIs(modal.values["user"], selected_member)
+        self.assertEqual(set(modal.inputs), {"reason"})
+        self.assertEqual(modal.inputs["reason"].label, "사유")
+
+    async def test_transfer_uses_selected_member_instead_of_typed_username(self):
+        selected_member = SimpleNamespace(id=654321, display_name="Selected User")
+        response = SimpleNamespace(send_modal=AsyncMock())
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=123456),
+            response=response,
+        )
+        view = main.MemberSelectView(
+            123456,
+            command=main.ACTION_COMMANDS_BY_PATH["savings transfer"],
+            action="transfer",
+            language="ko",
+        )
+
+        await view.accept_member(interaction, selected_member)
+
+        modal = response.send_modal.await_args.args[0]
+        self.assertIsInstance(modal, main.BankActionModal)
+        self.assertIs(modal.initial_values["user"], selected_member)
+        self.assertEqual(set(modal.inputs), {"currency", "amount"})
+
+    def test_command_descriptions_follow_the_saved_language_in_menus(self):
+        korean = main.build_category_embed("admin", "ko")
+        english = main.build_category_embed("admin", "en")
+        korean_options = main.CategoryActionView(
+            123456, "ko", "admin"
+        ).children[0].options
+
+        self.assertRegex(korean.title, r"[가-힣]")
+        self.assertRegex(korean.description, r"[가-힣]")
+        self.assertNotRegex(english.description, r"[가-힣]")
+        self.assertRegex(korean_options[0].description, r"[가-힣]")
+
     async def test_action_modal_parses_choices_and_enforces_numeric_ranges(self):
         evaluation = main.get_command_by_path("market evaluate")
         modal = main.CommandActionModal(123456, evaluation)
@@ -589,6 +666,25 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             response.send_message.await_args.kwargs["content"],
             "You do not have an account. Run /profile register first.",
         )
+
+    async def test_send_public_does_not_pass_an_empty_view(self):
+        pool = FakePool()
+        response = SimpleNamespace(
+            is_done=lambda: False,
+            send_message=AsyncMock(),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=123456),
+            response=response,
+        )
+
+        with patch.object(main, "pool", pool, create=True):
+            await main.send_public(interaction, "정수를 입력하세요.")
+
+        message_options = response.send_message.await_args.kwargs
+        self.assertEqual(message_options["content"], "정수를 입력하세요.")
+        self.assertNotIn("view", message_options)
+        self.assertFalse(message_options["ephemeral"])
 
     def test_bot_does_not_send_ephemeral_interaction_messages(self):
         source = ast.parse(Path(main.__file__).read_text())

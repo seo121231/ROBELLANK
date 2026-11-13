@@ -40,8 +40,67 @@ COMMAND_CATEGORIES = (
     ("market", "Stock listings, evaluations, and announcements"),
     ("admin", "Administrative bank settings and account controls"),
 )
+CATEGORY_LABELS = {
+    "profile": {"en": "Accounts", "ko": "계정"},
+    "storage": {"en": "Storage", "ko": "보관함"},
+    "requests": {"en": "Requests", "ko": "의뢰"},
+    "savings": {"en": "Savings", "ko": "저축"},
+    "loan": {"en": "Loans", "ko": "대출"},
+    "stocks": {"en": "Stocks", "ko": "주식"},
+    "market": {"en": "Market", "ko": "시장"},
+    "admin": {"en": "Admin", "ko": "관리자"},
+}
+PARAMETER_LABELS_KO = {
+    "activity": "활동",
+    "adjustment": "조정 항목",
+    "amount": "금액",
+    "channel": "채널",
+    "content": "내용",
+    "currency": "재화",
+    "deposit_rate": "예금 이율",
+    "description": "설명",
+    "detail": "세부 내용",
+    "direction": "방향",
+    "events": "이벤트",
+    "evidence": "근거",
+    "from_currency": "보낼 재화",
+    "growth": "성장",
+    "holder": "보유자",
+    "influence": "영향",
+    "initial_shares": "초기 발행 주식 수",
+    "item": "아이템",
+    "kind": "종류",
+    "language": "언어",
+    "limit_price": "지정가",
+    "loan_id": "대출 번호",
+    "loan_rate": "대출 이율",
+    "membership": "회원",
+    "name": "이름",
+    "note": "메모",
+    "officer": "담당자",
+    "opinion": "의견",
+    "order_id": "주문 번호",
+    "price": "가격",
+    "quantity": "수량",
+    "reason": "사유",
+    "request_id": "의뢰 번호",
+    "score": "점수",
+    "shares": "주식 수",
+    "status": "상태",
+    "stock": "종목",
+    "stock_name": "종목명",
+    "symbol": "기호",
+    "title": "제목",
+    "to": "받을 재화",
+    "user": "사용자",
+    "value": "값",
+    "verified_value": "확인된 가치",
+}
 ACTION_COMMANDS_BY_PATH: dict[str, app_commands.Command] = {}
 ACTION_COMMANDS_BY_CATEGORY: dict[str, list[app_commands.Command]] = {}
+COMMAND_DESCRIPTION_COPIES: dict[str, dict[str, str]] = {}
+COMMAND_PARAMETER_DESCRIPTION_COPIES: dict[tuple[str, str], dict[str, str]] = {}
+COMMAND_CHOICE_LABEL_COPIES: dict[tuple[str, str, str], dict[str, str]] = {}
 PENDING_ACTIONS: dict[str, dict[str, object]] = {}
 
 
@@ -55,6 +114,9 @@ def require_discord_token() -> str:
 
 
 def configure_command_registry(tree: app_commands.CommandTree) -> None:
+    COMMAND_DESCRIPTION_COPIES.clear()
+    COMMAND_PARAMETER_DESCRIPTION_COPIES.clear()
+    COMMAND_CHOICE_LABEL_COPIES.clear()
     choice_labels = {
         "ko": "Korean",
         "en": "English",
@@ -106,47 +168,125 @@ def configure_command_registry(tree: app_commands.CommandTree) -> None:
                 if not isinstance(descendant, app_commands.Group)
             ]
             description = remove_admin_prefix(command.description)
-            command.description = english_copy(
+            english_description = english_copy(
                 description, f"Open {command.name.replace('-', ' ').title()} tools"
             )[:100]
-            if leaf_commands and all(leaf.checks for leaf in leaf_commands):
-                command.description = (
+            is_admin_group = bool(
+                leaf_commands and all(leaf.checks for leaf in leaf_commands)
+            )
+            korean_description = description
+            if is_admin_group:
+                english_description = (
                     ADMIN_DESCRIPTION_PREFIX
-                    + command.description[: 100 - len(ADMIN_DESCRIPTION_PREFIX)]
+                    + english_description[: 100 - len(ADMIN_DESCRIPTION_PREFIX)]
                 )
+                if re.search(r"[가-힣]", korean_description):
+                    korean_description = f"관리자 전용 · {korean_description}"
+            COMMAND_DESCRIPTION_COPIES[command.qualified_name] = {
+                "ko": korean_description[:100],
+                "en": english_description[:100],
+            }
+            command.description = english_description
             continue
 
         description = remove_admin_prefix(command.description)
-        description = english_copy(description, f"Run the {command_path} action")
+        korean_description = description
+        english_description = english_copy(
+            description, f"Run the {command_path} action"
+        )
         if getattr(command, "checks", ()):
-            description = (
+            english_description = (
                 ADMIN_DESCRIPTION_PREFIX
-                + description[: 100 - len(ADMIN_DESCRIPTION_PREFIX)]
+                + english_description[: 100 - len(ADMIN_DESCRIPTION_PREFIX)]
             )
-        command.description = description[:100]
+            if re.search(r"[가-힣]", korean_description):
+                korean_description = f"관리자 전용 · {korean_description}"
+        COMMAND_DESCRIPTION_COPIES[command.qualified_name] = {
+            "ko": korean_description[:100],
+            "en": english_description[:100],
+        }
+        command.description = english_description[:100]
 
         for parameter in command.parameters:
             parent_parameter = parameter._Parameter__parent
-            parameter_description = english_copy(
-                parameter.description,
+            korean_parameter_description = parameter.description
+            english_parameter_description = english_copy(
+                korean_parameter_description,
                 f"Enter {parameter.name.replace('_', ' ')}",
             )
-            parent_parameter.description = parameter_description[:100]
+            COMMAND_PARAMETER_DESCRIPTION_COPIES[
+                (command.qualified_name, parameter.name)
+            ] = {
+                "ko": korean_parameter_description[:100],
+                "en": english_parameter_description[:100],
+            }
+            parent_parameter.description = english_parameter_description[:100]
             if parent_parameter.choices:
-                parent_parameter.choices = [
-                    app_commands.Choice(
-                        name=(
-                            choice.name
-                            if not re.search(r"[가-힣]", choice.name)
-                            else choice_labels.get(
-                                str(choice.value),
-                                str(choice.value).replace("_", " ").title(),
-                            )
-                        )[:100],
-                        value=choice.value,
+                localized_choices = []
+                for choice in parent_parameter.choices:
+                    korean_choice_name = choice.name
+                    english_choice_name = (
+                        choice.name
+                        if not re.search(r"[가-힣]", choice.name)
+                        else choice_labels.get(
+                            str(choice.value),
+                            str(choice.value).replace("_", " ").title(),
+                        )
                     )
-                    for choice in parent_parameter.choices
-                ]
+                    COMMAND_CHOICE_LABEL_COPIES[
+                        (
+                            command.qualified_name,
+                            parameter.name,
+                            str(choice.value),
+                        )
+                    ] = {
+                        "ko": korean_choice_name[:100],
+                        "en": english_choice_name[:100],
+                    }
+                    localized_choices.append(
+                        app_commands.Choice(
+                            name=english_choice_name[:100],
+                            value=choice.value,
+                        )
+                    )
+                parent_parameter.choices = localized_choices
+
+
+def localized_command_description(
+    command: app_commands.Command, language: str
+) -> str:
+    return COMMAND_DESCRIPTION_COPIES.get(command.qualified_name, {}).get(
+        language, command.description
+    )
+
+
+def localized_parameter_description(
+    command: app_commands.Command,
+    parameter: app_commands.Parameter,
+    language: str,
+) -> str:
+    return COMMAND_PARAMETER_DESCRIPTION_COPIES.get(
+        (command.qualified_name, parameter.name), {}
+    ).get(language, parameter.description)
+
+
+def localized_choice_label(
+    command: app_commands.Command,
+    parameter: app_commands.Parameter,
+    choice: app_commands.Choice,
+    language: str,
+) -> str:
+    return COMMAND_CHOICE_LABEL_COPIES.get(
+        (command.qualified_name, parameter.name, str(choice.value)), {}
+    ).get(language, choice.name)
+
+
+def localized_parameter_label(parameter: app_commands.Parameter, language: str) -> str:
+    if language == "en":
+        return parameter.name.replace("_", " ").title()
+    return PARAMETER_LABELS_KO.get(
+        parameter.name, parameter.name.replace("_", " ")
+    )
 
 
 
@@ -233,6 +373,19 @@ def require_guild(interaction: discord.Interaction) -> str:
     if not interaction.guild_id:
         raise ValueError("서버 안에서만 사용할 수 있습니다.")
     return str(interaction.guild_id)
+
+
+async def resolve_server_member(
+    interaction: discord.Interaction, raw_value: str
+) -> discord.Member:
+    match = re.fullmatch(r"(?:<@!?(\d+)>|(\d+))", raw_value.strip())
+    if not match or interaction.guild is None:
+        raise ValueError("서버 사용자 선택 메뉴에서 사용자를 선택하세요.")
+    member_id = int(match.group(1) or match.group(2))
+    member = interaction.guild.get_member(member_id)
+    if member is None:
+        member = await interaction.guild.fetch_member(member_id)
+    return member
 
 
 def tier_for(member: discord.abc.User | discord.Member) -> str:
@@ -555,14 +708,17 @@ async def send_public(
             content = content[:1880] + "\n" + omitted
     if embed is not None:
         embed = localize_embed(embed, language)
+    message_options: dict[str, object] = {"ephemeral": False}
+    if content is not None:
+        message_options["content"] = content
+    if embed is not None:
+        message_options["embed"] = embed
+    if view is not None:
+        message_options["view"] = view
     if interaction.response.is_done():
-        await interaction.followup.send(
-            content=content, embed=embed, view=view, ephemeral=False
-        )
+        await interaction.followup.send(**message_options)
     else:
-        await interaction.response.send_message(
-            content=content, embed=embed, view=view, ephemeral=False
-        )
+        await interaction.response.send_message(**message_options)
 
 
 async def safe_command(interaction: discord.Interaction, action) -> None:
@@ -1729,12 +1885,28 @@ def build_category_embed(category_name: str, language: str) -> discord.Embed:
     if commands is None:
         raise ValueError("명령 범주를 찾을 수 없습니다.")
     lines = [
-        f"{command.name} — {command.description}"
+        f"{command.name} — {localized_command_description(command, language)}"
         for command in commands
     ]
     return discord.Embed(
-        title=category_name,
-        description="\n".join(lines) or "표시할 명령이 없습니다.",
+        title=CATEGORY_LABELS.get(category_name, {}).get(language, category_name),
+        description="\n".join(lines)
+        or ("No actions to display." if language == "en" else "표시할 명령이 없습니다."),
+        color=BANK_GOLD,
+    )
+
+
+def build_member_select_embed(
+    language: str, parameter_name: str = "user"
+) -> discord.Embed:
+    label = PARAMETER_LABELS_KO.get(parameter_name, parameter_name)
+    return discord.Embed(
+        title="Select a member" if language == "en" else "사용자 선택",
+        description=(
+            "Choose the server member for this action."
+            if language == "en"
+            else f"이 작업의 {label}을(를) 아래 목록에서 선택하세요."
+        ),
         color=BANK_GOLD,
     )
 
@@ -1889,7 +2061,7 @@ class BankMenuView(discord.ui.View):
             max_values=1,
             options=[
                 discord.SelectOption(
-                    label=name.replace("-", " ").title(),
+                    label=CATEGORY_LABELS[name][language],
                     value=name,
                 )
                 for name, _ in COMMAND_CATEGORIES
@@ -1904,18 +2076,50 @@ class BankMenuView(discord.ui.View):
         category_select.callback = select_category
         self.add_item(category_select)
         actions = [
-            ("account", "Account", discord.ButtonStyle.primary),
-            ("transfer", "Transfer", discord.ButtonStyle.primary),
-            ("deposit", "Deposit", discord.ButtonStyle.success),
-            ("withdraw", "Withdraw", discord.ButtonStyle.secondary),
-            ("exchange", "Exchange", discord.ButtonStyle.secondary),
-            ("stock-list", "Stock list", discord.ButtonStyle.primary),
-            ("portfolio", "Portfolio", discord.ButtonStyle.primary),
-            ("help", "Help", discord.ButtonStyle.primary),
-            ("menu", "Main menu", discord.ButtonStyle.secondary),
+            (
+                "account",
+                "Account" if english else "계정",
+                discord.ButtonStyle.primary,
+            ),
+            (
+                "transfer",
+                "Transfer" if english else "송금",
+                discord.ButtonStyle.primary,
+            ),
+            (
+                "deposit",
+                "Deposit" if english else "예금",
+                discord.ButtonStyle.success,
+            ),
+            (
+                "withdraw",
+                "Withdraw" if english else "출금",
+                discord.ButtonStyle.secondary,
+            ),
+            (
+                "exchange",
+                "Exchange" if english else "환전",
+                discord.ButtonStyle.secondary,
+            ),
+            (
+                "stock-list",
+                "Stock list" if english else "주식 목록",
+                discord.ButtonStyle.primary,
+            ),
+            (
+                "portfolio",
+                "Portfolio" if english else "포트폴리오",
+                discord.ButtonStyle.primary,
+            ),
+            ("help", "Help" if english else "도움말", discord.ButtonStyle.primary),
+            (
+                "menu",
+                "Main menu" if english else "메인 메뉴",
+                discord.ButtonStyle.secondary,
+            ),
             (
                 "language",
-                "Language: English" if english else "Language: Korean",
+                "Language: English" if english else "언어: 한국어",
                 discord.ButtonStyle.success,
             ),
         ]
@@ -1980,8 +2184,21 @@ class BankMenuView(discord.ui.View):
                 "withdraw",
                 "exchange",
             }:
+                if action == "transfer":
+                    await interaction.response.edit_message(
+                        embed=build_member_select_embed(language),
+                        view=MemberSelectView(
+                            self.owner_id,
+                            command=get_command_by_path("savings transfer"),
+                            action="transfer",
+                            language=language,
+                        ),
+                    )
+                    return
                 await interaction.response.send_modal(
-                    BankActionModal(interaction.user.id, action)
+                    BankActionModal(
+                        interaction.user.id, action, language=language
+                    )
                 )
                 return
             elif action in MENU_COMMAND_PATHS:
@@ -2087,6 +2304,7 @@ async def start_action_command(
         await invoke_action_command(interaction, command, {})
         return
 
+    language = await get_user_language(owner_id)
     simple_forms = {
         "savings transfer": "transfer",
         "savings deposit": "deposit",
@@ -2095,13 +2313,37 @@ async def start_action_command(
         "stocks stock sell": "sell-stock",
     }
     action = simple_forms.get(command.qualified_name)
-    modal = (
-        BankActionModal(owner_id, action)
-        if action
-        else None
-    )
-    if modal is not None:
-        await interaction.response.send_modal(modal)
+    if action == "transfer":
+        await interaction.response.send_message(
+            embed=build_member_select_embed(language),
+            view=MemberSelectView(
+                owner_id,
+                command=command,
+                action="transfer",
+                language=language,
+            ),
+        )
+        return
+    if action is not None:
+        await interaction.response.send_modal(
+            BankActionModal(owner_id, action, language=language)
+        )
+        return
+
+    user_parameters = [
+        parameter
+        for parameter in command.parameters
+        if parameter.type == discord.AppCommandOptionType.user
+    ]
+    if user_parameters:
+        await interaction.response.send_message(
+            embed=build_member_select_embed(language, user_parameters[0].name),
+            view=MemberSelectView(
+                owner_id,
+                command=command,
+                language=language,
+            ),
+        )
         return
 
     choice_parameters = [
@@ -2109,17 +2351,22 @@ async def start_action_command(
     ]
     if choice_parameters:
         await interaction.response.send_message(
-            "Choose the required options, then continue.",
-            view=ChoiceActionView(owner_id, command, choice_parameters),
+            "Choose the required options, then continue."
+            if language == "en"
+            else "필요한 항목을 선택한 뒤 계속을 누르세요.",
+            view=ChoiceActionView(
+                owner_id, command, choice_parameters, language=language
+            ),
         )
         return
-    await interaction.response.send_modal(CommandActionModal(owner_id, command))
+    await interaction.response.send_modal(
+        CommandActionModal(owner_id, command, language=language)
+    )
 
 
 class BankActionModal(discord.ui.Modal):
     FORM_FIELDS = {
         "transfer": (
-            ("user", "Member ID or mention", "Mention a server member or enter their ID"),
             ("currency", "Currency", "Currency name"),
             ("amount", "Amount", "Whole number"),
         ),
@@ -2147,8 +2394,45 @@ class BankActionModal(discord.ui.Modal):
             ("limit_price", "Limit price", "Price per share"),
         ),
     }
+    FORM_FIELDS_KO = {
+        "transfer": (
+            ("currency", "재화", "송금할 재화 이름"),
+            ("amount", "금액", "송금할 금액"),
+        ),
+        "deposit": (
+            ("currency", "재화", "재화 이름"),
+            ("amount", "금액", "정수"),
+        ),
+        "withdraw": (
+            ("currency", "재화", "재화 이름"),
+            ("amount", "금액", "정수"),
+        ),
+        "exchange": (
+            ("from_currency", "보낼 재화", "환전할 재화"),
+            ("to", "받을 재화", "받을 재화 이름"),
+            ("amount", "금액", "환전할 금액"),
+        ),
+        "buy-stock": (
+            ("stock", "종목", "상장된 종목 이름"),
+            ("shares", "주식 수", "정수"),
+            ("limit_price", "지정가", "주당 가격"),
+        ),
+        "sell-stock": (
+            ("stock", "종목", "상장된 종목 이름"),
+            ("shares", "주식 수", "정수"),
+            ("limit_price", "지정가", "주당 가격"),
+        ),
+    }
 
-    def __init__(self, owner_id: int, action: str):
+    def __init__(
+        self,
+        owner_id: int,
+        action: str,
+        *,
+        language: str = "ko",
+        initial_values: dict[str, object] | None = None,
+    ):
+        english = language == "en"
         super().__init__(
             title={
                 "transfer": "Transfer",
@@ -2157,13 +2441,31 @@ class BankActionModal(discord.ui.Modal):
                 "exchange": "Exchange",
                 "buy-stock": "Buy stock",
                 "sell-stock": "Sell stock",
+            }[action]
+            if english
+            else {
+                "transfer": "송금",
+                "deposit": "예금",
+                "withdraw": "출금",
+                "exchange": "환전",
+                "buy-stock": "주식 매수",
+                "sell-stock": "주식 매도",
             }[action],
             timeout=300,
         )
         self.owner_id = owner_id
         self.action = action
+        self.language = language
+        self.initial_values = dict(initial_values or {})
         self.inputs: dict[str, discord.ui.TextInput] = {}
-        for name, label, placeholder in self.FORM_FIELDS[action]:
+        form_fields = (
+            self.FORM_FIELDS[action]
+            if english
+            else self.FORM_FIELDS_KO[action]
+        )
+        for name, label, placeholder in form_fields:
+            if name in self.initial_values:
+                continue
             field = discord.ui.TextInput(
                 label=label,
                 placeholder=placeholder,
@@ -2175,32 +2477,54 @@ class BankActionModal(discord.ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.owner_id:
-            await send_private(interaction, "Only the user who opened this form can submit it.")
+            await send_private(interaction, "이 양식을 연 사용자만 제출할 수 있습니다.")
             return
         try:
-            values = {name: field.value.strip() for name, field in self.inputs.items()}
+            values = dict(self.initial_values)
+            values.update(
+                {name: field.value.strip() for name, field in self.inputs.items()}
+            )
             if "amount" in values or "shares" in values:
                 number_key = "amount" if "amount" in values else "shares"
-                quantity = int(values[number_key].replace(",", ""))
+                try:
+                    quantity = int(values[number_key].replace(",", ""))
+                except ValueError:
+                    raise ValueError(
+                        "Enter a whole number."
+                        if self.language == "en"
+                        else "정수를 입력하세요."
+                    ) from None
                 if not 1 <= quantity <= 2_147_483_647:
-                    raise ValueError("Enter a whole number between 1 and 2,147,483,647.")
+                    raise ValueError(
+                        "Enter a whole number between 1 and 2,147,483,647."
+                        if self.language == "en"
+                        else "1부터 2,147,483,647 사이의 정수를 입력하세요."
+                    )
                 values[number_key] = quantity
             if "limit_price" in values:
-                limit_price = int(values["limit_price"].replace(",", ""))
+                try:
+                    limit_price = int(values["limit_price"].replace(",", ""))
+                except ValueError:
+                    raise ValueError(
+                        "Enter a whole number."
+                        if self.language == "en"
+                        else "정수를 입력하세요."
+                    ) from None
                 if not 1 <= limit_price <= 2_147_483_647:
-                    raise ValueError("Limit price must be between 1 and 2,147,483,647.")
+                    raise ValueError(
+                        "Limit price must be between 1 and 2,147,483,647."
+                        if self.language == "en"
+                        else "지정가는 1부터 2,147,483,647 사이여야 합니다."
+                    )
                 values["limit_price"] = limit_price
 
             if self.action == "transfer":
-                member_input = values.pop("user")
-                match = re.fullmatch(r"(?:<@!?(\d+)>|(\d+))", member_input)
-                if not match or interaction.guild is None:
-                    raise ValueError("Enter a valid server member mention or ID.")
-                member_id = int(match.group(1) or match.group(2))
-                member = interaction.guild.get_member(member_id)
-                if member is None:
-                    member = await interaction.guild.fetch_member(member_id)
-                values["user"] = member
+                if "user" not in values:
+                    raise ValueError("송금 대상을 먼저 선택하세요.")
+                if isinstance(values["user"], str):
+                    values["user"] = await resolve_server_member(
+                        interaction, values["user"]
+                    )
 
             if self.action in {"deposit", "withdraw"}:
                 values["direction"] = app_commands.Choice(
@@ -2244,14 +2568,20 @@ class CategoryActionView(discord.ui.View):
             if command.name != "menu"
         ]
         selector = discord.ui.Select(
-            placeholder="Choose an action",
+            placeholder=(
+                "Choose an action"
+                if language == "en"
+                else "실행할 기능 선택"
+            ),
             min_values=1,
             max_values=1,
             options=[
                 discord.SelectOption(
                     label=command.name.replace("-", " ").title()[:100],
                     value=command.qualified_name,
-                    description=command.description[:100],
+                    description=localized_command_description(
+                        command, language
+                    )[:100],
                 )
                 for command in commands[:25]
             ],
@@ -2265,37 +2595,38 @@ class CategoryActionView(discord.ui.View):
         self.add_item(selector)
 
         run_button = discord.ui.Button(
-            label="Run selected action",
+            label="Run selected action" if language == "en" else "선택한 기능 실행",
             style=discord.ButtonStyle.primary,
             custom_id=f"robellank-action-run:{category}",
         )
 
         async def run_selected(interaction: discord.Interaction) -> None:
             if self.selected_path is None:
-                await send_private(interaction, "Choose an action first.")
+                await send_private(interaction, "먼저 기능을 선택하세요.")
                 return
             try:
                 command = get_command_by_path(self.selected_path)
                 await start_action_command(interaction, command, self.owner_id)
             except Exception:
                 logger.exception("Selected bank action could not be started")
-                await send_private(interaction, "The action could not be started.")
+                await send_private(interaction, "명령 작업을 시작하지 못했습니다.")
 
         run_button.callback = run_selected
         self.add_item(run_button)
 
         back_button = discord.ui.Button(
-            label="Back to menu",
+            label="Back to menu" if language == "en" else "메뉴로 돌아가기",
             style=discord.ButtonStyle.secondary,
             custom_id=f"robellank-action-back:{category}",
         )
 
         async def go_back(interaction: discord.Interaction) -> None:
+            current_language = await get_user_language(interaction.user.id)
             await interaction.response.edit_message(
                 embed=localize_embed(
-                    build_main_menu_embed(self.language), self.language
+                    build_main_menu_embed(current_language), current_language
                 ),
-                view=BankMenuView(self.owner_id, self.language),
+                view=BankMenuView(self.owner_id, current_language),
             )
 
         back_button.callback = go_back
@@ -2304,7 +2635,7 @@ class CategoryActionView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
             await send_private(
-                interaction, "Only the user who opened this menu can use it."
+                interaction, "이 메뉴를 연 사용자만 사용할 수 있습니다."
             )
             return False
         return True
@@ -2316,21 +2647,31 @@ class ChoiceActionView(discord.ui.View):
         owner_id: int,
         command: app_commands.Command,
         parameters: list[app_commands.Parameter],
+        *,
+        language: str = "ko",
+        initial_values: dict[str, object] | None = None,
     ):
         super().__init__(timeout=300)
         self.owner_id = owner_id
         self.command = command
         self.parameters = parameters
-        self.selected_values: dict[str, object] = {}
+        self.language = language
+        self.selected_values: dict[str, object] = dict(initial_values or {})
 
         for parameter in parameters:
             selector = discord.ui.Select(
-                placeholder=f"Choose {parameter.name.replace('_', ' ')}",
+                placeholder=(
+                    f"Choose {parameter.name.replace('_', ' ')}"
+                    if language == "en"
+                    else f"{localized_parameter_label(parameter, language)} 선택"
+                ),
                 min_values=1,
                 max_values=1,
                 options=[
                     discord.SelectOption(
-                        label=choice.name[:100],
+                        label=localized_choice_label(
+                            command, parameter, choice, language
+                        )[:100],
                         value=str(choice.value)[:100],
                     )
                     for choice in parameter.choices[:25]
@@ -2359,21 +2700,27 @@ class ChoiceActionView(discord.ui.View):
             self.add_item(selector)
 
         continue_button = discord.ui.Button(
-            label="Continue",
+            label="Continue" if language == "en" else "계속",
             style=discord.ButtonStyle.primary,
             custom_id=f"robellank-choice-continue:{command.name}",
         )
 
         async def continue_action(interaction: discord.Interaction) -> None:
             missing = [
-                parameter.name
+                parameter
                 for parameter in self.parameters
                 if parameter.name not in self.selected_values
             ]
             if missing:
+                labels = ", ".join(
+                    localized_parameter_label(parameter, self.language)
+                    for parameter in missing
+                )
                 await send_private(
                     interaction,
-                    f"Choose an option for {', '.join(missing)} first.",
+                    f"Choose an option for {labels} first."
+                    if self.language == "en"
+                    else f"먼저 선택하세요: {labels}",
                 )
                 return
             remaining = [
@@ -2391,6 +2738,7 @@ class ChoiceActionView(discord.ui.View):
                         self.owner_id,
                         self.command,
                         values=self.selected_values,
+                        language=self.language,
                     )
                 )
 
@@ -2400,19 +2748,25 @@ class ChoiceActionView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
             await send_private(
-                interaction, "Only the user who opened this menu can use it."
+                interaction,
+                "Only the user who opened this menu can use it."
+                if self.language == "en"
+                else "이 메뉴는 명령을 실행한 사용자만 사용할 수 있습니다.",
             )
             return False
         return True
 
 
 class ContinueActionView(discord.ui.View):
-    def __init__(self, owner_id: int, state_id: str):
+    def __init__(
+        self, owner_id: int, state_id: str, *, language: str = "ko"
+    ):
         super().__init__(timeout=300)
         self.owner_id = owner_id
         self.state_id = state_id
+        self.language = language
         button = discord.ui.Button(
-            label="Continue",
+            label="Continue" if language == "en" else "계속",
             style=discord.ButtonStyle.primary,
             custom_id=f"robellank-action-continue:{state_id}",
         )
@@ -2420,11 +2774,15 @@ class ContinueActionView(discord.ui.View):
         async def continue_form(interaction: discord.Interaction) -> None:
             state = PENDING_ACTIONS.get(self.state_id)
             if state is None:
-                await send_private(interaction, "This form has expired. Start again from the menu.")
+                await send_private(
+                    interaction, "양식이 만료되었습니다. 메뉴에서 다시 시작해 주세요."
+                )
                 return
             if datetime.now(UTC) > state["expires_at"]:
                 PENDING_ACTIONS.pop(self.state_id, None)
-                await send_private(interaction, "This form has expired. Start again from the menu.")
+                await send_private(
+                    interaction, "양식이 만료되었습니다. 메뉴에서 다시 시작해 주세요."
+                )
                 return
             await interaction.response.send_modal(
                 CommandActionModal(
@@ -2432,6 +2790,7 @@ class ContinueActionView(discord.ui.View):
                     state["command"],
                     values=state["values"],
                     state_id=self.state_id,
+                    language=state.get("language", self.language),
                 )
             )
 
@@ -2440,9 +2799,7 @@ class ContinueActionView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
-            await send_private(
-                interaction, "Only the user who started this form can continue."
-            )
+            await send_private(interaction, "이 양식을 시작한 사용자만 계속할 수 있습니다.")
             return False
         return True
 
@@ -2461,12 +2818,14 @@ class CommandActionModal(discord.ui.Modal):
         *,
         values: dict[str, object] | None = None,
         state_id: str | None = None,
+        language: str = "ko",
     ):
         super().__init__(title=command.qualified_name[:45], timeout=300)
         self.owner_id = owner_id
         self.command = command
         self.values = dict(values or {})
         self.state_id = state_id
+        self.language = language
         self.parameters = [
             parameter
             for parameter in command.parameters
@@ -2476,12 +2835,21 @@ class CommandActionModal(discord.ui.Modal):
         self.inputs: dict[str, discord.ui.TextInput] = {}
 
         for parameter in self.page_parameters:
-            placeholder = parameter.description[:100]
+            placeholder = localized_parameter_description(
+                command, parameter, language
+            )[:100]
             if parameter.choices:
-                choices = ", ".join(choice.name for choice in parameter.choices)
-                placeholder = f"Options: {choices}"[:100]
+                choices = ", ".join(
+                    localized_choice_label(command, parameter, choice, language)
+                    for choice in parameter.choices
+                )
+                placeholder = (
+                    f"Options: {choices}"
+                    if language == "en"
+                    else f"선택지: {choices}"
+                )[:100]
             field = discord.ui.TextInput(
-                label=parameter.name.replace("_", " ").title()[:45],
+                label=localized_parameter_label(parameter, language)[:45],
                 placeholder=placeholder,
                 required=parameter.required,
                 default=None if parameter.required else "",
@@ -2498,14 +2866,7 @@ class CommandActionModal(discord.ui.Modal):
     async def resolve_member(
         self, interaction: discord.Interaction, raw_value: str
     ) -> discord.Member:
-        match = re.fullmatch(r"(?:<@!?(\d+)>|(\d+))", raw_value.strip())
-        if not match or interaction.guild is None:
-            raise ValueError("Enter a valid server member mention or ID.")
-        member_id = int(match.group(1) or match.group(2))
-        member = interaction.guild.get_member(member_id)
-        if member is None:
-            member = await interaction.guild.fetch_member(member_id)
-        return member
+        return await resolve_server_member(interaction, raw_value)
 
     async def parse_value(
         self,
@@ -2519,27 +2880,69 @@ class CommandActionModal(discord.ui.Modal):
                     choice
                     for choice in parameter.choices
                     if raw_value.casefold()
-                    in {choice.name.casefold(), str(choice.value).casefold()}
+                    in {
+                        choice.name.casefold(),
+                        str(choice.value).casefold(),
+                        localized_choice_label(
+                            self.command, parameter, choice, self.language
+                        ).casefold(),
+                    }
                 ),
                 None,
             )
             if selected is None:
                 raise ValueError(
-                    f"Choose one of: {', '.join(choice.name for choice in parameter.choices)}."
+                    (
+                        f"Choose one of: {', '.join(choice.name for choice in parameter.choices)}."
+                        if self.language == "en"
+                        else "다음 중 하나를 선택하세요: "
+                        + ", ".join(
+                            localized_choice_label(
+                                self.command, parameter, choice, self.language
+                            )
+                            for choice in parameter.choices
+                        )
+                        + "."
+                    )
                 )
             return app_commands.Choice(name=selected.name, value=selected.value)
 
         if parameter.type == discord.AppCommandOptionType.user:
             return await self.resolve_member(interaction, raw_value)
         if parameter.type == discord.AppCommandOptionType.integer:
-            value: object = int(raw_value.replace(",", ""))
+            try:
+                value: object = int(raw_value.replace(",", ""))
+            except ValueError:
+                raise ValueError(
+                    "Enter a whole number."
+                    if self.language == "en"
+                    else "정수를 입력하세요."
+                ) from None
         elif parameter.type == discord.AppCommandOptionType.number:
-            value = float(raw_value.replace(",", ""))
+            try:
+                value = float(raw_value.replace(",", ""))
+            except ValueError:
+                raise ValueError(
+                    "Enter a number."
+                    if self.language == "en"
+                    else "숫자를 입력하세요."
+                ) from None
         elif parameter.type == discord.AppCommandOptionType.boolean:
             normalized = raw_value.casefold()
-            if normalized not in {"true", "false", "yes", "no"}:
-                raise ValueError("Enter true or false.")
-            value = normalized in {"true", "yes"}
+            if normalized not in {
+                "true",
+                "false",
+                "yes",
+                "no",
+                "예",
+                "아니오",
+            }:
+                raise ValueError(
+                    "Enter true/false or yes/no."
+                    if self.language == "en"
+                    else "true/false 또는 예/아니오를 입력하세요."
+                )
+            value = normalized in {"true", "yes", "예"}
         else:
             return raw_value
 
@@ -2547,16 +2950,26 @@ class CommandActionModal(discord.ui.Modal):
         minimum = metadata.min_value
         maximum = metadata.max_value
         if minimum is not None and value < minimum:
-            raise ValueError(f"{parameter.name.replace('_', ' ').title()} is too small.")
+            raise ValueError(
+                (
+                    f"{localized_parameter_label(parameter, self.language)} is too small."
+                    if self.language == "en"
+                    else f"{localized_parameter_label(parameter, self.language)} 값이 너무 작습니다."
+                )
+            )
         if maximum is not None and value > maximum:
-            raise ValueError(f"{parameter.name.replace('_', ' ').title()} is too large.")
+            raise ValueError(
+                (
+                    f"{localized_parameter_label(parameter, self.language)} is too large."
+                    if self.language == "en"
+                    else f"{localized_parameter_label(parameter, self.language)} 값이 너무 큽니다."
+                )
+            )
         return value
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if interaction.user.id != self.owner_id:
-            await send_private(
-                interaction, "Only the user who opened this form can submit it."
-            )
+            await send_private(interaction, "이 양식을 연 사용자만 제출할 수 있습니다.")
             return
 
         try:
@@ -2566,7 +2979,11 @@ class CommandActionModal(discord.ui.Modal):
                 if not raw_value:
                     if parameter.required:
                         raise ValueError(
-                            f"{parameter.name.replace('_', ' ').title()} is required."
+                            (
+                                f"{localized_parameter_label(parameter, self.language)} is required."
+                                if self.language == "en"
+                                else f"{localized_parameter_label(parameter, self.language)}은(는) 필수입니다."
+                            )
                         )
                     continue
                 accumulated[parameter.name] = await self.parse_value(
@@ -2579,11 +2996,16 @@ class CommandActionModal(discord.ui.Modal):
                     "owner_id": self.owner_id,
                     "command": self.command,
                     "values": accumulated,
+                    "language": self.language,
                     "expires_at": datetime.now(UTC) + timedelta(minutes=5),
                 }
                 await interaction.response.send_message(
-                    "Continue the form to enter the remaining details.",
-                    view=ContinueActionView(self.owner_id, state_id),
+                    "Continue the form to enter the remaining details."
+                    if self.language == "en"
+                    else "나머지 내용을 입력하려면 계속을 누르세요.",
+                    view=ContinueActionView(
+                        self.owner_id, state_id, language=self.language
+                    ),
                 )
                 return
             if self.state_id:
@@ -2592,13 +3014,155 @@ class CommandActionModal(discord.ui.Modal):
         except ValueError as error:
             await send_private(interaction, str(error))
         except discord.NotFound:
-            await send_private(interaction, "That member is not in this server.")
+            await send_private(interaction, "해당 사용자가 이 서버에 없습니다.")
         except Exception:
             logger.exception("Command action form failed")
             await send_private(
                 interaction,
-                "The action could not be completed. Please try again or contact an administrator.",
+                "작업을 완료하지 못했습니다. 다시 시도하거나 관리자에게 문의하세요.",
             )
+
+
+class MemberSelectView(discord.ui.View):
+    def __init__(
+        self,
+        owner_id: int,
+        *,
+        command: app_commands.Command,
+        language: str,
+        action: str | None = None,
+        values: dict[str, object] | None = None,
+    ):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.command = command
+        self.language = language
+        self.action = action
+        self.selected_values = dict(values or {})
+        self.pending_user_parameters = [
+            parameter
+            for parameter in command.parameters
+            if parameter.type == discord.AppCommandOptionType.user
+            and parameter.name not in self.selected_values
+        ]
+        self.current_parameter = self.pending_user_parameters[0]
+
+        selector = discord.ui.UserSelect(
+            placeholder=(
+                "Select a server member"
+                if language == "en"
+                else f"{localized_parameter_label(self.current_parameter, language)} 선택"
+            ),
+            min_values=1,
+            max_values=1,
+        )
+
+        async def select_member(interaction: discord.Interaction) -> None:
+            await self.accept_member(interaction, selector.values[0])
+
+        selector.callback = select_member
+        self.add_item(selector)
+
+        if not self.current_parameter.required:
+            skip_button = discord.ui.Button(
+                label="Use my account" if language == "en" else "내 계정 사용",
+                style=discord.ButtonStyle.secondary,
+            )
+
+            async def skip_member(interaction: discord.Interaction) -> None:
+                await self.accept_member(interaction, None)
+
+            skip_button.callback = skip_member
+            self.add_item(skip_button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await send_private(
+                interaction, "이 사용자 선택 화면을 연 사용자만 사용할 수 있습니다."
+            )
+            return False
+        return True
+
+    async def accept_member(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member | discord.User | None,
+    ) -> None:
+        self.selected_values[self.current_parameter.name] = member
+        remaining_users = [
+            parameter
+            for parameter in self.command.parameters
+            if parameter.type == discord.AppCommandOptionType.user
+            and parameter.name not in self.selected_values
+        ]
+        if remaining_users:
+            next_view = MemberSelectView(
+                self.owner_id,
+                command=self.command,
+                language=self.language,
+                action=self.action,
+                values=self.selected_values,
+            )
+            await interaction.response.edit_message(
+                embed=build_member_select_embed(
+                    self.language, next_view.current_parameter.name
+                ),
+                view=next_view,
+            )
+            return
+
+        if self.action == "transfer":
+            await interaction.response.send_modal(
+                BankActionModal(
+                    self.owner_id,
+                    "transfer",
+                    language=self.language,
+                    initial_values=self.selected_values,
+                )
+            )
+            return
+
+        choice_parameters = [
+            parameter
+            for parameter in self.command.parameters
+            if parameter.choices and parameter.name not in self.selected_values
+        ]
+        if choice_parameters:
+            await interaction.response.edit_message(
+                content=(
+                    "Choose the required options, then continue."
+                    if self.language == "en"
+                    else "필요한 항목을 선택한 뒤 계속을 누르세요."
+                ),
+                embed=None,
+                view=ChoiceActionView(
+                    self.owner_id,
+                    self.command,
+                    choice_parameters,
+                    language=self.language,
+                    initial_values=self.selected_values,
+                ),
+            )
+            return
+
+        remaining_parameters = [
+            parameter
+            for parameter in self.command.parameters
+            if parameter.name not in self.selected_values
+        ]
+        if remaining_parameters:
+            await interaction.response.send_modal(
+                CommandActionModal(
+                    self.owner_id,
+                    self.command,
+                    values=self.selected_values,
+                    language=self.language,
+                )
+            )
+            return
+        await invoke_action_command(
+            interaction, self.command, self.selected_values
+        )
 
 
 @bot.tree.command(name="menu", description="은행 메뉴와 주식 목록을 엽니다")
