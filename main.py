@@ -29,6 +29,7 @@ pool: asyncpg.Pool
 
 ADMIN_DESCRIPTION_PREFIX = "Admin only · "
 BANK_GOLD = 0xD7B43B
+ACCOUNT_SECTION_DIVIDER = "────────────"
 COMMAND_CATEGORIES = (
     ("profile", "Accounts, balances, tier, history, and language"),
     ("storage", "Bank storage and item requests"),
@@ -113,7 +114,6 @@ def configure_command_registry(tree: app_commands.CommandTree) -> None:
                     ADMIN_DESCRIPTION_PREFIX
                     + command.description[: 100 - len(ADMIN_DESCRIPTION_PREFIX)]
                 )
-                app_commands.default_permissions(administrator=True)(command)
             continue
 
         description = remove_admin_prefix(command.description)
@@ -161,6 +161,25 @@ TIERS = [
 TIER_ORDER = {key: rank for key, _, rank, _ in TIERS}
 TIER_NAME = {key: label for key, label, _, _ in TIERS}
 TIER_ROLE = {key: role_id for key, _, _, role_id in TIERS}
+TIER_ROLE_BY_ID = {role_id: key for key, role_id in TIER_ROLE.items()}
+TIER_ROLE_NAME_ALIASES = {
+    "bronze": {"bronze", "브론즈"},
+    "silver": {"silver", "실버"},
+    "gold": {"gold", "골드"},
+    "platinum": {"platinum", "플레티넘", "플래티넘"},
+    "ace": {"ace", "에이스"},
+    "vip": {"vip"},
+}
+ADMIN_ROLE_NAME_ALIASES = {
+    "admin",
+    "administrator",
+    "serveradmin",
+    "serveradministrator",
+    "관리자",
+    "서버관리자",
+    "은행관리자",
+    "운영자",
+}
 CREDIT_ADJUSTMENTS = {
     "savings_maturity": ("적금 만기 유지 (+2점)", 2),
     "savings_early": ("적금 중도 해지 (-1점)", -1),
@@ -203,11 +222,59 @@ def require_guild(interaction: discord.Interaction) -> str:
 
 
 def tier_for(member: discord.abc.User | discord.Member) -> str:
-    role_ids = {str(role.id) for role in getattr(member, "roles", [])}
-    for key, _, _, role_id in reversed(TIERS):
-        if role_id in role_ids:
-            return key
-    return "bronze"
+    matched_tiers = []
+    for role in getattr(member, "roles", []):
+        tier = TIER_ROLE_BY_ID.get(str(getattr(role, "id", "")))
+        if tier is None:
+            name = normalize_discord_role_name(getattr(role, "name", ""))
+            tier = next(
+                (
+                    key
+                    for key, aliases in TIER_ROLE_NAME_ALIASES.items()
+                    if name in aliases
+                ),
+                None,
+            )
+        if tier is not None:
+            matched_tiers.append(tier)
+    return max(matched_tiers, key=TIER_ORDER.__getitem__, default="bronze")
+
+
+def normalize_discord_role_name(name: object) -> str:
+    normalized = unicodedata.normalize("NFKC", str(name)).casefold()
+    normalized = re.sub(r"[^a-z0-9가-힣]+", "", normalized)
+    affixes = ("tier", "rank", "level", "role", "등급", "티어", "레벨")
+    changed = True
+    while normalized and changed:
+        changed = False
+        for affix in affixes:
+            if normalized.startswith(affix):
+                normalized = normalized[len(affix) :]
+                changed = True
+            if normalized.endswith(affix):
+                normalized = normalized[: -len(affix)]
+                changed = True
+    return normalized
+
+
+def has_server_admin_access(member: discord.abc.User | discord.Member) -> bool:
+    permissions = getattr(member, "guild_permissions", None)
+    if getattr(permissions, "administrator", False) or getattr(
+        permissions, "manage_guild", False
+    ):
+        return True
+
+    for role in getattr(member, "roles", []):
+        role_name = unicodedata.normalize(
+            "NFKC", str(getattr(role, "name", ""))
+        ).casefold()
+        normalized_name = normalize_discord_role_name(role_name)
+        name_tokens = set(re.findall(r"[a-z]+|[가-힣]+", role_name))
+        if normalized_name in ADMIN_ROLE_NAME_ALIASES or name_tokens.intersection(
+            {"admin", "administrator", "관리자", "운영자"}
+        ):
+            return True
+    return False
 
 
 def tier_at_least(tier: str, minimum: str) -> bool:
@@ -578,6 +645,7 @@ def build_account_embed(
             name=label,
             value=(
                 f"**{wallet_label}**\n{fmt(row['wallet'] or 0)} {symbol}\n"
+                f"\n{ACCOUNT_SECTION_DIVIDER}\n\n"
                 f"**{savings_label}**\n{fmt(row['deposit'] or 0)} {symbol}"
             ),
             inline=False,
@@ -1711,6 +1779,81 @@ def build_stock_list_embed(
     return embed
 
 
+def build_language_embed(language: str, *, updated: bool = False) -> discord.Embed:
+    if updated:
+        title = "Language updated" if language == "en" else "언어 설정 완료"
+        description = (
+            "All bot commands and responses will now use English."
+            if language == "en"
+            else "이제 모든 명령어와 응답이 한국어로 표시됩니다."
+        )
+    else:
+        title = "Choose a language" if language == "en" else "언어 선택"
+        description = (
+            "Choose the language for all bot commands and responses."
+            if language == "en"
+            else "모든 명령어와 응답에 사용할 언어를 선택하세요."
+        )
+    return discord.Embed(title=title, description=description, color=BANK_GOLD)
+
+
+class LanguageSelectView(discord.ui.View):
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await send_public(
+                interaction,
+                "This language selector belongs to another user."
+                if await get_user_language(interaction.user.id) == "en"
+                else "이 언어 선택 화면은 다른 사용자의 화면입니다.",
+            )
+            return False
+        return True
+
+    async def select_language(
+        self, interaction: discord.Interaction, language: str
+    ) -> None:
+        try:
+            await set_user_language(interaction.user.id, language)
+        except Exception:
+            logger.exception("Could not save user language preference")
+            await send_public(
+                interaction,
+                "Could not save your language setting. Please try again."
+                if language == "en"
+                else "언어 설정을 저장하지 못했습니다. 다시 시도해 주세요.",
+                language=language,
+            )
+            return
+        await interaction.response.edit_message(
+            embed=build_language_embed(language, updated=True),
+            view=None,
+        )
+
+    @discord.ui.button(
+        label="한국어",
+        style=discord.ButtonStyle.secondary,
+        custom_id="robellank-language:ko",
+    )
+    async def choose_korean(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await self.select_language(interaction, "ko")
+
+    @discord.ui.button(
+        label="English",
+        style=discord.ButtonStyle.primary,
+        custom_id="robellank-language:en",
+    )
+    async def choose_english(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        await self.select_language(interaction, "en")
+
+
 class BankMenuView(discord.ui.View):
     def __init__(self, owner_id: int, language: str):
         super().__init__(timeout=300)
@@ -1780,9 +1923,11 @@ class BankMenuView(discord.ui.View):
         try:
             language = await get_user_language(interaction.user.id)
             if action == "language":
-                language = "en" if language == "ko" else "ko"
-                await set_user_language(interaction.user.id, language)
-                embed = build_main_menu_embed(language)
+                await interaction.response.edit_message(
+                    embed=build_language_embed(language),
+                    view=LanguageSelectView(self.owner_id),
+                )
+                return
             elif action == "help":
                 embed = build_help_embed(language)
             elif action == "stocks":
@@ -1790,6 +1935,15 @@ class BankMenuView(discord.ui.View):
                 embed = build_stock_list_embed(rows, language)
             elif action.startswith("category:"):
                 category_name = action.removeprefix("category:")
+                if category_name == "admin" and not has_server_admin_access(
+                    interaction.user
+                ):
+                    await send_public(
+                        interaction,
+                        "이 메뉴는 서버 관리자만 사용할 수 있습니다.",
+                        language=language,
+                    )
+                    return
                 embed = build_category_embed(
                     category_name, language
                 )
@@ -1875,9 +2029,8 @@ async def require_action_permission(
 ) -> None:
     if not command.checks:
         return
-    permissions = getattr(interaction.user, "guild_permissions", None)
-    if not permissions or not permissions.administrator:
-        raise ValueError("This action is available to server administrators only.")
+    if not has_server_admin_access(interaction.user):
+        raise ValueError("이 작업은 서버 관리자만 사용할 수 있습니다.")
 
 
 async def invoke_action_command(
@@ -5439,8 +5592,23 @@ def register_menu_command_tree(tree: app_commands.CommandTree) -> None:
             language=language,
         )
 
+    async def open_language_selector(interaction: discord.Interaction) -> None:
+        language = await get_user_language(interaction.user.id)
+        await send_public(
+            interaction,
+            embed=build_language_embed(language),
+            view=LanguageSelectView(interaction.user.id),
+            language=language,
+        )
+
     def make_category_callback(category: str):
         async def open_category(interaction: discord.Interaction) -> None:
+            if category == "admin" and not has_server_admin_access(interaction.user):
+                await send_public(
+                    interaction,
+                    "이 메뉴는 서버 관리자만 사용할 수 있습니다.",
+                )
+                return
             language = await get_user_language(interaction.user.id)
             await send_public(
                 interaction,
@@ -5466,6 +5634,13 @@ def register_menu_command_tree(tree: app_commands.CommandTree) -> None:
             callback=open_main_menu,
         )
     )
+    tree.add_command(
+        app_commands.Command(
+            name="language",
+            description="Choose Korean or English for bot responses",
+            callback=open_language_selector,
+        )
+    )
 
     descriptions = {
         "profile": "Open account, balance, tier, and history actions",
@@ -5483,8 +5658,6 @@ def register_menu_command_tree(tree: app_commands.CommandTree) -> None:
             description=descriptions[category],
             callback=make_category_callback(category),
         )
-        if category == "admin":
-            app_commands.default_permissions(administrator=True)(command)
         tree.add_command(command)
 
     tree.add_command(

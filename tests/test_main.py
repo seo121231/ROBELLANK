@@ -3,7 +3,7 @@ import ast
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import main
 from localization import translate_message
@@ -80,6 +80,21 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(main.tier_at_least("gold", "platinum"))
         self.assertFalse(main.tier_at_least("unknown", "silver"))
 
+    def test_tier_detection_accepts_role_names_and_uses_highest_tier(self):
+        member = SimpleNamespace(
+            roles=[
+                SimpleNamespace(id=900001, name="브론즈 등급"),
+                SimpleNamespace(id=900002, name="⭐ Gold Tier"),
+                SimpleNamespace(id=900003, name="VIP"),
+            ]
+        )
+
+        self.assertEqual(main.tier_for(member), "vip")
+        self.assertEqual(
+            main.tier_for(SimpleNamespace(roles=[SimpleNamespace(id=900004, name="플래티넘")])),
+            "platinum",
+        )
+
     def test_evaluation_score_ranges(self):
         self.assertEqual(main.evaluation_change_range(0), (0, 0))
         self.assertEqual(main.evaluation_change_range(5), (1, 2))
@@ -113,7 +128,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(main.is_unscored_market_evaluation(row))
         self.assertIn("점수 미등록 · 무작위 변동", main.market_report_line(row))
 
-    def test_only_ten_english_slash_commands_are_registered(self):
+    def test_eleven_english_slash_commands_are_registered(self):
         commands = {
             command.name: command.to_dict(main.bot.tree)
             for command in main.bot.tree.get_commands()
@@ -122,6 +137,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             set(commands),
             {
                 "menu",
+                "language",
                 "help",
                 "profile",
                 "storage",
@@ -133,7 +149,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
                 "admin",
             },
         )
-        self.assertLessEqual(len(commands), 15)
+        self.assertEqual(len(commands), 11)
         stock_commands = {
             command.name
             for command in main.ACTION_COMMANDS_BY_CATEGORY["stocks"]
@@ -160,12 +176,19 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
     def test_language_and_menu_commands_are_registered(self):
         language = main.ACTION_COMMANDS_BY_PATH["profile language"]
         menu = main.bot.tree.get_command("menu")
+        language_selector = main.bot.tree.get_command("language")
 
         self.assertIsNotNone(language)
         self.assertIsNotNone(menu)
+        self.assertIsNotNone(language_selector)
+        self.assertEqual(language_selector.parameters, [])
         self.assertEqual(
             {choice.value for choice in language.parameters[0].choices},
             {"ko", "en"},
+        )
+        self.assertEqual(
+            [button.label for button in main.LanguageSelectView(123456).children],
+            ["한국어", "English"],
         )
 
     def test_menu_has_public_navigation_and_language_buttons(self):
@@ -262,20 +285,44 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(choice.value, "fake_information")
 
-    async def test_admin_button_actions_still_require_server_administrator(self):
+    async def test_admin_actions_allow_server_managers_and_admin_roles(self):
         command = main.ACTION_COMMANDS_BY_PATH["admin mint"]
         regular_user = SimpleNamespace(
-            guild_permissions=SimpleNamespace(administrator=False)
+            guild_permissions=SimpleNamespace(
+                administrator=False, manage_guild=False
+            ),
+            roles=[],
         )
         admin_user = SimpleNamespace(
-            guild_permissions=SimpleNamespace(administrator=True)
+            guild_permissions=SimpleNamespace(
+                administrator=True, manage_guild=False
+            ),
+            roles=[],
+        )
+        server_manager = SimpleNamespace(
+            guild_permissions=SimpleNamespace(
+                administrator=False, manage_guild=True
+            ),
+            roles=[],
+        )
+        admin_role_user = SimpleNamespace(
+            guild_permissions=SimpleNamespace(
+                administrator=False, manage_guild=False
+            ),
+            roles=[SimpleNamespace(id=900005, name="서버 관리자")],
         )
 
-        with self.assertRaisesRegex(ValueError, "server administrators"):
+        with self.assertRaisesRegex(ValueError, "서버 관리자"):
             await main.require_action_permission(
                 SimpleNamespace(user=regular_user), command
             )
         await main.require_action_permission(SimpleNamespace(user=admin_user), command)
+        await main.require_action_permission(
+            SimpleNamespace(user=server_manager), command
+        )
+        await main.require_action_permission(
+            SimpleNamespace(user=admin_role_user), command
+        )
 
     def test_help_lists_only_english_slash_commands(self):
         lines = main.build_help_embed("ko").description.splitlines()
@@ -283,6 +330,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             lines,
             [
                 "/menu",
+                "/language",
                 "/profile",
                 "/storage",
                 "/requests",
@@ -384,6 +432,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(embed.fields), 2)
         self.assertIn("Wallet", embed.fields[0].value)
         self.assertIn("588,000 B", embed.fields[0].value)
+        self.assertIn(main.ACCOUNT_SECTION_DIVIDER, embed.fields[0].value)
         self.assertIn("Savings", embed.fields[0].value)
         self.assertIn("28,000 B", embed.fields[0].value)
         self.assertIn("803 BR", embed.fields[1].value)
@@ -474,6 +523,47 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pool.connection.execute_args, ("123456", "en"))
         self.assertEqual(pool.connection.fetch_user_id, "123456")
 
+    async def test_language_button_saves_preference_and_confirms_selection(self):
+        pool = FakePool()
+        response = SimpleNamespace(edit_message=AsyncMock())
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=123456),
+            response=response,
+        )
+
+        with patch.object(main, "pool", pool, create=True):
+            await main.LanguageSelectView(123456).select_language(
+                interaction, "en"
+            )
+            saved_language = await main.get_user_language(123456)
+
+        self.assertEqual(saved_language, "en")
+        response.edit_message.assert_awaited_once()
+        confirmation = response.edit_message.await_args.kwargs
+        self.assertEqual(confirmation["embed"].title, "Language updated")
+        self.assertIsNone(confirmation["view"])
+
+    async def test_all_public_command_replies_use_the_saved_language(self):
+        pool = FakePool()
+        response = SimpleNamespace(
+            is_done=lambda: False,
+            send_message=AsyncMock(),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=123456),
+            response=response,
+        )
+        source = "계좌가 없습니다. 먼저 /profile register를 사용하세요."
+
+        with patch.object(main, "pool", pool, create=True):
+            await main.set_user_language(123456, "en")
+            await main.send_public(interaction, source)
+
+        self.assertEqual(
+            response.send_message.await_args.kwargs["content"],
+            "You do not have an account. Run /profile register first.",
+        )
+
     def test_bot_does_not_send_ephemeral_interaction_messages(self):
         source = ast.parse(Path(main.__file__).read_text())
         ephemeral_true_calls = []
@@ -515,8 +605,9 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         benefits = main.ACTION_COMMANDS_BY_PATH["admin tier-benefits"]
 
         self.assertTrue(mint.description.startswith(main.ADMIN_DESCRIPTION_PREFIX))
-        self.assertTrue(other.default_permissions.administrator)
-        self.assertTrue(credit.default_permissions.administrator)
+        self.assertIsNone(other.default_permissions)
+        self.assertIsNone(credit.default_permissions)
+        self.assertTrue(mint.checks)
         self.assertTrue(
             credit_adjust.description.startswith(main.ADMIN_DESCRIPTION_PREFIX)
         )
