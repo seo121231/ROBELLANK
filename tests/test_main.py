@@ -96,6 +96,11 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(main.tier_at_least("gold", "platinum"))
         self.assertFalse(main.tier_at_least("unknown", "silver"))
 
+    def test_credit_loan_limit_uses_two_thousand_bell_per_point(self):
+        self.assertEqual(main.credit_loan_limit(50), 100_000)
+        self.assertEqual(main.credit_loan_limit(100), 200_000)
+        self.assertEqual(main.credit_loan_limit(50, 75_000), 175_000)
+
     def test_tier_detection_accepts_role_names_and_uses_highest_tier(self):
         member = SimpleNamespace(
             roles=[
@@ -682,10 +687,10 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_language_setting_translates_known_messages_and_keeps_korean(self):
-        original = "계좌가 없습니다. 먼저 /profile register를 사용하세요."
+        original = "계좌가 없습니다. 먼저 `/menu`에서 계좌 개설을 선택하세요."
         self.assertEqual(
             translate_message(original, "en"),
-            "You do not have an account. Run /profile register first.",
+            "You do not have an account. Open `/menu` and choose account registration first.",
         )
         self.assertEqual(translate_message(original, "ko"), original)
 
@@ -735,7 +740,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             user=SimpleNamespace(id=123456),
             response=response,
         )
-        source = "계좌가 없습니다. 먼저 /profile register를 사용하세요."
+        source = "계좌가 없습니다. 먼저 `/menu`에서 계좌 개설을 선택하세요."
 
         with patch.object(main, "pool", pool, create=True):
             await main.set_user_language(123456, "en")
@@ -743,7 +748,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             response.send_message.await_args.kwargs["content"],
-            "You do not have an account. Run /profile register first.",
+            "You do not have an account. Open `/menu` and choose account registration first.",
         )
 
     async def test_send_public_does_not_pass_an_empty_view(self):
@@ -813,6 +818,105 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             credit_adjust.description.startswith(main.ADMIN_DESCRIPTION_PREFIX)
         )
         self.assertTrue(benefits.description.startswith(main.ADMIN_DESCRIPTION_PREFIX))
+
+    def test_currency_delete_and_stock_relist_actions_are_admin_only(self):
+        currency_delete = main.ACTION_COMMANDS_BY_PATH["admin currency delete"]
+        currency_remove = main.ACTION_COMMANDS_BY_PATH["admin currency remove"]
+        market_relist = main.ACTION_COMMANDS_BY_PATH["market relist"]
+
+        self.assertTrue(currency_delete.checks)
+        self.assertTrue(currency_remove.checks)
+        self.assertTrue(market_relist.checks)
+        self.assertIn(currency_delete, main.ACTION_COMMANDS_BY_CATEGORY["admin"])
+        self.assertIn(market_relist, main.ACTION_COMMANDS_BY_CATEGORY["market"])
+        self.assertIn("delete", currency_delete.name)
+
+    def test_currency_removal_and_relisting_confirmations_are_translated(self):
+        currency_message = (
+            "재화 `가지`를 사용 중지합니다. "
+            "잔액과 거래 기록은 보존됩니다. 사유: 운영 종료"
+        )
+        relist_message = (
+            "다음 종목을 다시 상장합니다: `테스트 주식`. "
+            "기존 보유 주식과 거래 기록은 보존됩니다. 사유: 운영 재개"
+        )
+
+        self.assertEqual(
+            translate_message(currency_message, "en"),
+            "Disable currency 가지? Balances and transaction history will be preserved. Reason: 운영 종료",
+        )
+        self.assertEqual(
+            translate_message(relist_message, "en"),
+            "Relist 테스트 주식? Existing holdings and trade history will be preserved. Reason: 운영 재개",
+        )
+        self.assertEqual(
+            translate_message(
+                "재화 `가지`를 사용 중지했습니다. 사유: 운영 종료",
+                "en",
+            ),
+            "Disabled currency 가지. Reason: 운영 종료",
+        )
+
+    def test_stock_supply_cannot_exceed_the_database_integer_limit(self):
+        main.validate_share_supply(2_147_483_646, 1)
+        with self.assertRaisesRegex(ValueError, "2,147,483,647"):
+            main.validate_share_supply(2_147_483_647, 1)
+
+    def test_user_facing_platinum_tier_spelling_is_correct(self):
+        self.assertEqual(main.TIER_NAME["platinum"], "플래티넘")
+        self.assertEqual(
+            translate_message(
+                "은행 의뢰는 플래티넘 등급 이상부터 이용할 수 있습니다.", "en"
+            ),
+            "Bank requests are available to Platinum tier and above.",
+        )
+
+    async def test_confirmation_button_rechecks_admin_permission(self):
+        action = AsyncMock(return_value="executed")
+        view = main.ConfirmActionView(123456, action)
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=123456,
+                guild_permissions=SimpleNamespace(
+                    administrator=False, manage_guild=False
+                ),
+                roles=[],
+            ),
+            response=SimpleNamespace(edit_message=AsyncMock()),
+        )
+
+        with patch.object(main, "get_user_language", AsyncMock(return_value="ko")):
+            await view.children[0].callback(interaction)
+
+        action.assert_not_awaited()
+        self.assertEqual(
+            interaction.response.edit_message.await_args.kwargs["content"],
+            "관리자 권한이 확인되지 않아 실행하지 않았습니다.",
+        )
+
+    async def test_confirmation_button_shows_action_validation_errors(self):
+        async def reject_action():
+            raise ValueError("기본재화는 사용 중지할 수 없습니다.")
+
+        view = main.ConfirmActionView(123456, reject_action)
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=123456,
+                guild_permissions=SimpleNamespace(
+                    administrator=True, manage_guild=False
+                ),
+                roles=[],
+            ),
+            response=SimpleNamespace(edit_message=AsyncMock()),
+        )
+
+        with patch.object(main, "get_user_language", AsyncMock(return_value="ko")):
+            await view.children[0].callback(interaction)
+
+        self.assertEqual(
+            interaction.response.edit_message.await_args.kwargs["content"],
+            "기본재화는 사용 중지할 수 없습니다.",
+        )
 
 
 if __name__ == "__main__":

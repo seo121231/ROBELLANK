@@ -62,6 +62,8 @@ COMMAND_DESCRIPTION_KO = {
     "menu": "은행 메뉴와 주식 목록을 엽니다",
     "language": "봇 응답 언어를 한국어 또는 영어로 설정합니다",
     "help": "은행 봇 사용법과 전체 명령어를 확인합니다",
+    "admin currency delete": "관리자: 재화를 사용 중지하고 기존 기록을 보존합니다",
+    "market relist": "상장 폐지된 종목을 기존 기록과 함께 다시 상장합니다",
 }
 PARAMETER_LABELS_KO = {
     "activity": "활동",
@@ -386,7 +388,7 @@ TIERS = [
     ("bronze", "브론즈", 0, "1524024521999253514"),
     ("silver", "실버", 1, "1524024634213929031"),
     ("gold", "골드", 2, "1524024821808369765"),
-    ("platinum", "플레티넘", 3, "1524398392606855269"),
+    ("platinum", "플래티넘", 3, "1524398392606855269"),
     ("ace", "에이스", 4, "1524024941438304316"),
     ("vip", "VIP", 5, "1524024999973884066"),
 ]
@@ -550,10 +552,18 @@ def tier_at_least(tier: str, minimum: str) -> bool:
     return TIER_ORDER.get(tier, 0) >= TIER_ORDER[minimum]
 
 
-async def base_currency(conn: asyncpg.Connection, guild_id: str) -> asyncpg.Record:
+def credit_loan_limit(credit_score: int, platinum_bonus: int = 0) -> int:
+    return credit_score * 2_000 + platinum_bonus
+
+
+async def base_currency(
+    conn: asyncpg.Connection, guild_id: str, *, lock: bool = False
+) -> asyncpg.Record:
     row = await conn.fetchrow(
-        """SELECT id, name, symbol, exchange_value, deposit_rate, loan_rate, is_base, active
-             FROM bank_currencies WHERE guild_id=$1 AND is_base=true AND active=true LIMIT 1""",
+        f"""SELECT id, name, symbol, exchange_value, deposit_rate, loan_rate, is_base, active
+             FROM bank_currencies
+            WHERE guild_id=$1 AND is_base=true AND active=true
+            LIMIT 1{" FOR SHARE" if lock else ""}""",
         guild_id,
     )
     if row:
@@ -565,6 +575,14 @@ async def base_currency(conn: asyncpg.Connection, guild_id: str) -> asyncpg.Reco
            ON CONFLICT (guild_id,name) DO UPDATE SET active=true,is_base=true
            RETURNING id,name,symbol,exchange_value,deposit_rate,loan_rate,is_base,active""",
         guild_id,
+    )
+
+
+async def lock_base_currency(conn: asyncpg.Connection, guild_id: str) -> None:
+    await conn.fetchval(
+        "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",
+        guild_id,
+        "robellank-bankbot:base-currency",
     )
 
 
@@ -592,7 +610,7 @@ async def account(
         user_id,
     )
     if not row:
-        raise ValueError("계좌가 없습니다. 먼저 /profile register를 사용하세요.")
+        raise ValueError("계좌가 없습니다. 먼저 `/menu`에서 계좌 개설을 선택하세요.")
     if row["frozen"] and not allow_frozen:
         raise ValueError("계좌가 동결되어 거래할 수 없습니다. 관리자에게 문의하세요.")
     return row
@@ -1303,10 +1321,11 @@ async def tier(interaction: discord.Interaction) -> None:
                 acct["id"],
                 currency_row["id"],
             )
-            credit_limit = acct["credit_score"] * 10_000 + (
+            credit_limit = credit_loan_limit(
+                acct["credit_score"],
                 int(settings["platinum_loan_bonus"])
                 if tier_at_least(tier_key, "platinum")
-                else 0
+                else 0,
             )
             storage_limit = await conn.fetchval(
                 f"SELECT {tier_key}_storage_limit FROM bank_tier_settings WHERE guild_id=$1",
@@ -1651,9 +1670,10 @@ async def place_order(
         raise ValueError("20:30~21:00 시세 산정 시간에는 주문할 수 없습니다.")
     async with pool.acquire() as conn:
         async with conn.transaction():
+            await lock_base_currency(conn, guild_id)
             acct = await account(conn, guild_id, user_id, lock=True)
             stock = await find_stock(conn, guild_id, stock_name, lock=True)
-            base = await base_currency(conn, guild_id)
+            base = await base_currency(conn, guild_id, lock=True)
             if side == "buy":
                 cost = quantity * limit_price
                 if cost > 9_007_199_254_740_991:
@@ -3373,10 +3393,11 @@ async def loan_request(
                     "SELECT platinum_loan_bonus FROM bank_tier_settings WHERE guild_id=$1",
                     guild_id,
                 )
-                limit = acct["credit_score"] * 10000 + (
+                limit = credit_loan_limit(
+                    acct["credit_score"],
                     int(settings["platinum_loan_bonus"])
                     if tier_at_least(tier_key, "platinum")
-                    else 0
+                    else 0,
                 )
                 used = await conn.fetchval(
                     """SELECT COALESCE(SUM(CASE WHEN status='approved' THEN amount_due ELSE principal END),0)
@@ -3707,10 +3728,11 @@ async def review_loan(
                         "SELECT platinum_loan_bonus,loan_term_days FROM bank_tier_settings WHERE guild_id=$1",
                         guild_id,
                     )
-                    limit = loan["credit_score"] * 10000 + (
+                    limit = credit_loan_limit(
+                        loan["credit_score"],
                         int(settings["platinum_loan_bonus"])
                         if tier_at_least(loan["requested_tier"], "platinum")
-                        else 0
+                        else 0,
                     )
                     used = await conn.fetchval(
                         """SELECT COALESCE(SUM(CASE WHEN status='approved' THEN amount_due ELSE principal END),0)
@@ -4054,17 +4076,42 @@ async def currency_setbase(interaction: discord.Interaction, currency: str) -> N
         guild_id = require_guild(interaction)
         async with pool.acquire() as conn:
             async with conn.transaction():
+                await lock_base_currency(conn, guild_id)
                 selected = await get_currency(conn, guild_id, currency, lock=True)
-                await conn.execute(
-                    "UPDATE bank_currencies SET is_base=false WHERE guild_id=$1",
-                    guild_id,
-                )
-                await conn.execute(
-                    "UPDATE bank_currencies SET is_base=true WHERE id=$1",
-                    selected["id"],
-                )
+                current_base = await base_currency(conn, guild_id, lock=True)
+                already_base = selected["id"] == current_base["id"]
+                if not already_base:
+                    open_orders = await conn.fetchval(
+                        """SELECT 1 FROM bank_stock_orders
+                            WHERE guild_id=$1 AND status IN ('open','partial')
+                            LIMIT 1""",
+                        guild_id,
+                    )
+                    if open_orders:
+                        raise ValueError(
+                            "미체결 주식 주문이 있어 기본재화를 변경할 수 없습니다. 주문을 먼저 취소하거나 시장 마감까지 기다려 주세요."
+                        )
+                    has_stock_history = await conn.fetchval(
+                        "SELECT 1 FROM bank_stocks WHERE guild_id=$1 LIMIT 1",
+                        guild_id,
+                    )
+                    if has_stock_history:
+                        raise ValueError(
+                            "주식 시세와 거래 기록이 있어 기본재화를 변경할 수 없습니다."
+                        )
+                    await conn.execute(
+                        "UPDATE bank_currencies SET is_base=false WHERE guild_id=$1",
+                        guild_id,
+                    )
+                    await conn.execute(
+                        "UPDATE bank_currencies SET is_base=true WHERE id=$1",
+                        selected["id"],
+                    )
         await send_private(
-            interaction, f"{selected['name']}을 기본재화로 지정했습니다."
+            interaction,
+            f"현재 기본재화는 `{selected['name']}`입니다."
+            if already_base
+            else f"기본재화를 `{selected['name']}`로 지정했습니다.",
         )
 
     await safe_command(interaction, run)
@@ -4123,9 +4170,7 @@ async def currency_setrate(
     await safe_command(interaction, run)
 
 
-@currency_group.command(name="remove", description="관리자: 재화를 비활성화합니다")
-@app_commands.checks.has_permissions(administrator=True)
-async def currency_remove(
+async def request_currency_deactivation(
     interaction: discord.Interaction, currency: str, reason: str
 ) -> None:
     guild_id = require_guild(interaction)
@@ -4135,7 +4180,7 @@ async def currency_remove(
             async with conn.transaction():
                 selected = await get_currency(conn, guild_id, currency, lock=True)
                 if selected["is_base"]:
-                    raise ValueError("기본재화는 삭제할 수 없습니다.")
+                    raise ValueError("기본재화는 사용 중지할 수 없습니다.")
                 in_use = await conn.fetchval(
                     """SELECT 1 FROM bank_balances WHERE currency_id=$1 AND (wallet<>0 OR deposit<>0)
                        UNION ALL SELECT 1 FROM bank_loans WHERE currency_id=$1 AND status IN ('pending','approved') LIMIT 1""",
@@ -4143,19 +4188,37 @@ async def currency_remove(
                 )
                 if in_use:
                     raise ValueError(
-                        "잔액 또는 대출이 남아 있어 비활성화할 수 없습니다."
+                        "잔액이나 진행 중인 대출이 남아 있어 사용 중지할 수 없습니다."
                     )
                 await conn.execute(
                     "UPDATE bank_currencies SET active=false WHERE id=$1",
                     selected["id"],
                 )
-        return f"{selected['name']} 재화를 비활성화했습니다. 사유: {reason}"
+        return f"재화 `{selected['name']}`를 사용 중지했습니다. 사유: {reason}"
 
     await send_public(
         interaction,
-        f"{currency} 재화를 비활성화합니다. 사유: {reason}",
+        f"재화 `{currency}`를 사용 중지합니다. 잔액과 거래 기록은 보존됩니다. 사유: {reason}",
         view=ConfirmActionView(interaction.user.id, action),
     )
+
+
+@currency_group.command(name="remove", description="관리자: 재화를 비활성화합니다")
+@app_commands.checks.has_permissions(administrator=True)
+async def currency_remove(
+    interaction: discord.Interaction, currency: str, reason: str
+) -> None:
+    await request_currency_deactivation(interaction, currency, reason)
+
+
+@currency_group.command(
+    name="delete", description="관리자: 재화를 사용 중지하고 기존 기록을 보존합니다"
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def currency_delete(
+    interaction: discord.Interaction, currency: str, reason: str
+) -> None:
+    await request_currency_deactivation(interaction, currency, reason)
 
 
 bot.tree.add_command(currency_group)
@@ -4179,11 +4242,25 @@ class ConfirmActionView(discord.ui.View):
     async def confirm(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
+        language = await get_user_language(interaction.user.id)
+        if not has_server_admin_access(interaction.user):
+            await interaction.response.edit_message(
+                content=translate_message(
+                    "관리자 권한이 확인되지 않아 실행하지 않았습니다.",
+                    language,
+                ),
+                view=None,
+            )
+            return
         try:
             result = await self.action()
-            language = await get_user_language(interaction.user.id)
             await interaction.response.edit_message(
                 content=translate_message(result, language), view=None
+            )
+        except ValueError as error:
+            language = await get_user_language(interaction.user.id)
+            await interaction.response.edit_message(
+                content=translate_message(str(error), language), view=None
             )
         except Exception:
             logger.exception("Confirmed action failed")
@@ -4940,7 +5017,7 @@ async def request_submit(
         guild_id = require_guild(interaction)
         tier_key = tier_for(interaction.user)
         if not tier_at_least(tier_key, "platinum"):
-            raise ValueError("은행 의뢰는 플레티넘 등급 이상부터 이용할 수 있습니다.")
+            raise ValueError("은행 의뢰는 플래티넘 등급 이상부터 이용할 수 있습니다.")
         item_name = unicodedata.normalize("NFKC", item.strip())
         if not item_name:
             raise ValueError("아이템·재료 이름을 입력하세요.")
@@ -5315,6 +5392,7 @@ async def change_stock_supply(
             )
             stock = await find_stock(conn, guild_id, stock_name, lock=True)
             if operation == "issue":
+                validate_share_supply(stock["total_shares"], shares)
                 await conn.execute(
                     "UPDATE bank_stocks SET total_shares=total_shares+$1 WHERE id=$2",
                     shares,
@@ -5424,6 +5502,66 @@ async def market_burn(
     )
 
 
+async def relist_stock(
+    guild_id: str, stock_name: str, actor_id: str, reason: str
+) -> asyncpg.Record:
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            stock = await conn.fetchrow(
+                """SELECT id,name,listed FROM bank_stocks
+                    WHERE guild_id=$1 AND lower(trim(name))=lower(trim($2))
+                    LIMIT 1 FOR UPDATE""",
+                guild_id,
+                stock_name,
+            )
+            if not stock:
+                raise ValueError(f"종목 이름 '{stock_name}'을(를) 찾을 수 없습니다.")
+            if stock["listed"]:
+                raise ValueError("이미 상장된 종목입니다.")
+            await conn.execute(
+                "UPDATE bank_stocks SET listed=true WHERE id=$1",
+                stock["id"],
+            )
+            await conn.execute(
+                """INSERT INTO bank_market_news (guild_id,stock_id,title,content,created_by)
+                   VALUES ($1,$2,'재상장',$3,$4)""",
+                guild_id,
+                stock["id"],
+                reason,
+                actor_id,
+            )
+    return stock
+
+
+@market_group.command(
+    name="relist",
+    description="상장 폐지된 종목을 기존 기록과 함께 다시 상장합니다",
+)
+@app_commands.checks.has_permissions(administrator=True)
+async def market_relist(
+    interaction: discord.Interaction, stock: str, reason: str
+) -> None:
+    guild_id = require_guild(interaction)
+
+    async def action():
+        row = await relist_stock(
+            guild_id, stock, str(interaction.user.id), reason
+        )
+        message = (
+            f"다음 종목을 다시 상장했습니다: `{row['name']}`. "
+            f"기존 보유 주식과 거래 기록은 보존됩니다. 사유: {reason}"
+        )
+        await send_announcement(guild_id, message)
+        return message
+
+    await send_public(
+        interaction,
+        f"다음 종목을 다시 상장합니다: `{stock}`. "
+        f"기존 보유 주식과 거래 기록은 보존됩니다. 사유: {reason}",
+        view=ConfirmActionView(interaction.user.id, action),
+    )
+
+
 @market_group.command(
     name="remove", description="상장을 폐지하고 미체결 주문을 취소합니다"
 )
@@ -5455,7 +5593,12 @@ async def market_remove(
                     reason,
                     str(interaction.user.id),
                 )
-        return f"{row['name']} 상장을 폐지하고 미체결 주문을 취소했습니다. 보유 주식과 기록은 보존됩니다."
+        message = (
+            f"{row['name']} 상장을 폐지하고 미체결 주문을 취소했습니다. "
+            "보유 주식과 기록은 보존됩니다."
+        )
+        await send_announcement(guild_id, message)
+        return message
 
     await send_public(
         interaction,
@@ -5573,6 +5716,13 @@ def market_news_content(row: asyncpg.Record) -> str:
         f"영향력 {signed(row['influence_score'])}, 여론 {signed(row['opinion_score'])})\n"
         f"근거: {row['evidence']}"
     )
+
+
+def validate_share_supply(total_shares: int, additional_shares: int) -> None:
+    if total_shares + additional_shares > 2_147_483_647:
+        raise ValueError(
+            "총 발행 주식 수는 2,147,483,647주를 넘을 수 없습니다."
+        )
 
 
 @market_group.command(
@@ -6231,6 +6381,7 @@ def organize_command_categories(tree: app_commands.CommandTree) -> None:
                 "issue": "issue",
                 "burn": "burn",
                 "remove": "remove",
+                "relist": "relist",
                 "evaluate": "evaluate",
                 "publish": "publish",
                 "channel": "channel",
@@ -6255,6 +6406,7 @@ def organize_command_categories(tree: app_commands.CommandTree) -> None:
                 "setvalue": "setvalue",
                 "setrate": "setrate",
                 "remove": "remove",
+                "delete": "delete",
             },
         ),
     )

@@ -24,6 +24,7 @@ STATIC_EN = {
     "이 작업은 서버 관리자만 사용할 수 있습니다.": "This action is available to server administrators only.",
     "이 메뉴는 서버 관리자만 사용할 수 있습니다.": "This menu is available to server administrators only.",
     "이 명령어를 사용할 권한이 없습니다.": "You do not have permission to use this command.",
+    "관리자 권한이 확인되지 않아 실행하지 않았습니다.": "Administrator permissions could not be verified, so the action was not run.",
     "입력값 형식을 확인해 주세요. 채널은 목록에서 선택하거나 채널 이름을 입력해 주세요.": "Check the input format. Select a channel from the list or enter its name.",
     "요청을 처리하지 못했습니다.": "The request could not be processed.",
     "요청 처리 중 오류가 발생했습니다. 관리자에게 문의하세요.": "The command failed. Please contact a server administrator.",
@@ -51,8 +52,12 @@ STATIC_EN = {
     "저장했습니다. 게시할 채널이 설정되지 않아 공지 채널에는 올라가지 않았습니다.": "Saved, but no announcement channel is configured.",
     "아직 공개된 평가가 없습니다.": "No evaluation has been published yet.",
     "아직 체결된 거래가 없습니다.": "No trades have been completed yet.",
-    "기본재화는 삭제할 수 없습니다.": "The base currency cannot be removed.",
-    "잔액 또는 대출이 남아 있어 비활성화할 수 없습니다.": "This currency cannot be disabled while balances or loans remain.",
+    "기본재화는 사용 중지할 수 없습니다.": "The base currency cannot be disabled.",
+    "잔액이나 진행 중인 대출이 남아 있어 사용 중지할 수 없습니다.": "This currency cannot be disabled while balances or active loans remain.",
+    "미체결 주식 주문이 있어 기본재화를 변경할 수 없습니다. 주문을 먼저 취소하거나 시장 마감까지 기다려 주세요.": "The base currency cannot be changed while stock orders are open. Cancel them first or wait for the market close.",
+    "주식 시세와 거래 기록이 있어 기본재화를 변경할 수 없습니다.": "The base currency cannot be changed because stock prices and trade records already exist.",
+    "이미 상장된 종목입니다.": "This stock is already listed.",
+    "총 발행 주식 수는 2,147,483,647주를 넘을 수 없습니다.": "Total issued shares cannot exceed 2,147,483,647.",
     "본인에게 송금할 수 없습니다.": "You cannot transfer funds to yourself.",
     "본인 계좌 상태는 변경할 수 없습니다.": "You cannot change your own account status.",
     "동결된 계좌와는 송금할 수 없습니다.": "Transfers to or from frozen accounts are not allowed.",
@@ -62,7 +67,7 @@ STATIC_EN = {
     "서로 다른 재화를 선택하세요.": "Choose two different currencies.",
     "환전 결과가 1 미만입니다. 더 큰 금액을 입력하세요.": "The exchange result is less than 1. Enter a larger amount.",
     "이 계좌는 동결되어 거래할 수 없습니다. 관리자에게 문의하세요.": "This account is frozen. Contact a server administrator.",
-    "계좌가 없습니다. 먼저 /profile register를 사용하세요.": "You do not have an account. Run /profile register first.",
+    "계좌가 없습니다. 먼저 `/menu`에서 계좌 개설을 선택하세요.": "You do not have an account. Open `/menu` and choose account registration first.",
     "취소할 수 있는 본인 주문이 없습니다.": "You have no open order that can be canceled.",
     "상환 가능한 본인 대출을 찾을 수 없습니다.": "No repayable loan was found for your account.",
     "연장할 수 있는 본인 대출을 찾을 수 없습니다.": "No loan that can be extended was found for your account.",
@@ -85,7 +90,6 @@ STATIC_EN = {
     "대상 사용자의 지갑 잔액이 부족합니다.": "The target user's wallet balance is insufficient.",
     "이 등급의 보관 한도가 설정되지 않았습니다.": "A storage limit has not been configured for this tier.",
     "은행 보관 수량이 부족합니다.": "The stored item quantity is insufficient.",
-    "은행 의뢰는 플레티넘 등급 이상부터 이용할 수 있습니다.": "Bank requests are available to Platinum tier and above.",
     "은행 의뢰는 플래티넘 등급 이상부터 이용할 수 있습니다.": "Bank requests are available to Platinum tier and above.",
     "진행 중인 은행 의뢰는 사용자당 최대 5건까지 가능합니다.": "Each user can have up to 5 active bank requests.",
     "은행 의뢰를 찾을 수 없습니다.": "The bank request was not found.",
@@ -486,10 +490,31 @@ PATTERNS = [
     ),
     (
         re.compile(
-            r"^(?P<name>.+) 재화를 비활성화했습니다\. 사유: (?P<reason>.*)$",
+            r"^재화 `(?P<name>.+)`를 사용 중지했습니다\. 사유: (?P<reason>.*)$",
             re.S,
         ),
         lambda m: f"Disabled currency {m['name']}. Reason: {m['reason']}",
+    ),
+    (
+        re.compile(
+            r"^재화 `(?P<currency>.+)`를 사용 중지합니다\. 잔액과 거래 기록은 보존됩니다\. 사유: (?P<reason>.*)$",
+            re.S,
+        ),
+        lambda m: f"Disable currency {m['currency']}? Balances and transaction history will be preserved. Reason: {m['reason']}",
+    ),
+    (
+        re.compile(
+            r"^다음 종목을 다시 상장합니다: `(?P<stock>.+)`\. 기존 보유 주식과 거래 기록은 보존됩니다\. 사유: (?P<reason>.*)$",
+            re.S,
+        ),
+        lambda m: f"Relist {m['stock']}? Existing holdings and trade history will be preserved. Reason: {m['reason']}",
+    ),
+    (
+        re.compile(
+            r"^다음 종목을 다시 상장했습니다: `(?P<stock>.+)`\. 기존 보유 주식과 거래 기록은 보존됩니다\. 사유: (?P<reason>.*)$",
+            re.S,
+        ),
+        lambda m: f"Relisted {m['stock']}. Existing holdings and trade history were preserved. Reason: {m['reason']}",
     ),
     (
         re.compile(
@@ -500,7 +525,13 @@ PATTERNS = [
     ),
     (
         re.compile(
-            r"^(?P<name>.+)을 기본재화로 지정했습니다\.$", re.S
+            r"^현재 기본재화는 `(?P<name>.+)`입니다\.$", re.S
+        ),
+        lambda m: f"The current base currency is {m['name']}.",
+    ),
+    (
+        re.compile(
+            r"^기본재화를 `(?P<name>.+)`로 지정했습니다\.$", re.S
         ),
         lambda m: f"Set {m['name']} as the base currency.",
     ),
