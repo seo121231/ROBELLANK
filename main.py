@@ -881,7 +881,17 @@ bot = BankBot()
 
 @bot.event
 async def on_ready() -> None:
-    logger.info("ROBELLANK bank bot connected as %s", bot.user)
+    configured_guild_id = configured_discord_guild_id()
+    configured_guild_visible = configured_guild_id in {
+        guild.id for guild in bot.guilds
+    }
+    logger.info(
+        "ROBELLANK bank bot connected as %s; joined_guilds=%s; configured_guild_visible=%s; joined_guild_ids=%s",
+        bot.user,
+        len(bot.guilds),
+        configured_guild_visible,
+        [guild.id for guild in bot.guilds],
+    )
     for guild in bot.guilds:
         await ensure_guild(str(guild.id))
     if not scheduled_tasks.is_running():
@@ -1270,6 +1280,20 @@ async def tier(interaction: discord.Interaction) -> None:
     async def run():
         guild_id = require_guild(interaction)
         tier_key = tier_for(interaction.user)
+        recognized_tags = [
+            tag.strip()
+            for role in getattr(interaction.user, "roles", [])
+            for tag in re.findall(r"\[([^\[\]]+)\]", str(getattr(role, "name", "")))
+            if tag.strip() in TIER_ROLE_TAGS
+        ]
+        logger.info(
+            "Tier command evaluated: member_type=%s role_count=%s recognized_tags=%s result=%s configured_server_match=%s",
+            type(interaction.user).__name__,
+            len(getattr(interaction.user, "roles", [])),
+            recognized_tags,
+            tier_key,
+            configured_discord_guild_id() == int(guild_id),
+        )
         async with pool.acquire() as conn:
             acct = await account(
                 conn, guild_id, str(interaction.user.id), allow_frozen=True

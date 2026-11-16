@@ -134,6 +134,14 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(main.tier_for(member), "ace")
+        self.assertEqual(
+            main.tier_for(
+                SimpleNamespace(
+                    roles=[SimpleNamespace(id=900017, name="[platinum]")]
+                )
+            ),
+            "platinum",
+        )
         self.assertEqual(main.tier_for(uppercase_vip), "vip")
         self.assertEqual(main.tier_for(lowercase_vip_with_legacy_id), "bronze")
 
