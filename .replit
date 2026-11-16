@@ -42,3 +42,8 @@ timeoutMs = 20000
 [nix]
 channel = "stable-25_05"
 packages = ["postgresql"]
+
+[userenv]
+
+[userenv.shared]
+DISCORD_GUILD_ID = "1522924865592496189"

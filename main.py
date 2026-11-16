@@ -50,6 +50,19 @@ CATEGORY_LABELS = {
     "market": {"en": "Market", "ko": "시장"},
     "admin": {"en": "Admin", "ko": "관리자"},
 }
+COMMAND_DESCRIPTION_KO = {
+    "profile": "계정, 잔액, 등급, 거래 내역 및 언어 설정",
+    "storage": "은행 보관 아이템과 보관 설정",
+    "requests": "은행 아이템 의뢰 관리",
+    "savings": "재화, 송금, 환전 및 예금",
+    "loan": "대출 신청, 상환 및 심사",
+    "stocks": "가상주식 거래와 보유 현황",
+    "market": "주식 상장, 평가 및 공지",
+    "admin": "은행 설정과 계좌 관리",
+    "menu": "은행 메뉴와 주식 목록을 엽니다",
+    "language": "봇 응답 언어를 한국어 또는 영어로 설정합니다",
+    "help": "은행 봇 사용법과 전체 명령어를 확인합니다",
+}
 PARAMETER_LABELS_KO = {
     "activity": "활동",
     "adjustment": "조정 항목",
@@ -96,6 +109,52 @@ PARAMETER_LABELS_KO = {
     "value": "값",
     "verified_value": "확인된 가치",
 }
+PARAMETER_DESCRIPTIONS_KO = {
+    "activity": "활동 점수 (0~6)",
+    "adjustment": "신용점수 조정 사유",
+    "amount": "처리할 금액",
+    "channel": "공지 채널을 선택하세요",
+    "content": "콘텐츠 점수 (0~6)",
+    "currency": "재화 이름",
+    "deposit_rate": "일일 예금 이율 (%)",
+    "description": "종목 소개",
+    "detail": "조정 내용",
+    "direction": "지갑과 예금 중 이동 방향",
+    "events": "이벤트 점수 (0~8)",
+    "evidence": "점수 산정 근거",
+    "from_currency": "보낼 재화",
+    "growth": "성장 점수 (0~5)",
+    "holder": "주식 또는 재화를 받을 사용자",
+    "influence": "영향력 점수 (0~5)",
+    "initial_shares": "처음 발행할 주식 수",
+    "item": "아이템 또는 재료 이름",
+    "kind": "공지 유형을 선택하세요",
+    "language": "봇에 표시할 언어를 선택하세요",
+    "limit_price": "주당 지정가",
+    "loan_id": "대출 번호",
+    "loan_rate": "일일 대출 이율 (%)",
+    "membership": "회원 점수 (0~5)",
+    "name": "재화 또는 종목 이름",
+    "note": "추가 메모",
+    "officer": "관계자로 지정할 사용자",
+    "opinion": "여론 점수 (0~5)",
+    "order_id": "취소할 주문 번호",
+    "price": "가격",
+    "quantity": "수량",
+    "reason": "처리 사유",
+    "request_id": "의뢰 번호",
+    "score": "점수",
+    "shares": "주식 수",
+    "status": "변경할 상태를 선택하세요",
+    "stock": "종목 이름",
+    "stock_name": "종목 이름",
+    "symbol": "재화 기호",
+    "title": "제목",
+    "to": "받을 재화",
+    "user": "대상 사용자를 선택하세요",
+    "value": "값",
+    "verified_value": "게임에서 확인한 담보 가치",
+}
 ACTION_COMMANDS_BY_PATH: dict[str, app_commands.Command] = {}
 ACTION_COMMANDS_BY_CATEGORY: dict[str, list[app_commands.Command]] = {}
 COMMAND_DESCRIPTION_COPIES: dict[str, dict[str, str]] = {}
@@ -111,6 +170,21 @@ def require_discord_token() -> str:
             logger.info("Loaded Discord bot token from %s", variable_name)
             return token
     raise RuntimeError("DISCORD_TOKEN or DISCORD_BOT_TOKEN is missing.")
+
+
+def configured_discord_guild_id() -> int | None:
+    raw_guild_id = (os.getenv("DISCORD_GUILD_ID") or "").strip()
+    if not raw_guild_id:
+        return None
+    try:
+        guild_id = int(raw_guild_id)
+    except ValueError as error:
+        raise RuntimeError(
+            "DISCORD_GUILD_ID must be a numeric Discord server ID."
+        ) from error
+    if guild_id <= 0:
+        raise RuntimeError("DISCORD_GUILD_ID must be a positive Discord server ID.")
+    return guild_id
 
 
 def configure_command_registry(tree: app_commands.CommandTree) -> None:
@@ -158,7 +232,17 @@ def configure_command_registry(tree: app_commands.CommandTree) -> None:
             value = value.removeprefix(prefix).strip()
         return value
 
-    for command in tree.walk_commands():
+    commands_by_path = {
+        command.qualified_name: command for command in tree.walk_commands()
+    }
+    commands_by_path.update(
+        {
+            command.qualified_name: command
+            for command in ACTION_COMMANDS_BY_PATH.values()
+        }
+    )
+
+    for command in commands_by_path.values():
         command_path = command.qualified_name.replace("-", " ").title()
         if isinstance(command, app_commands.Group):
             descendants = list(command.walk_commands())
@@ -174,7 +258,9 @@ def configure_command_registry(tree: app_commands.CommandTree) -> None:
             is_admin_group = bool(
                 leaf_commands and all(leaf.checks for leaf in leaf_commands)
             )
-            korean_description = description
+            korean_description = COMMAND_DESCRIPTION_KO.get(
+                command.qualified_name, description
+            )
             if is_admin_group:
                 english_description = (
                     ADMIN_DESCRIPTION_PREFIX
@@ -190,7 +276,9 @@ def configure_command_registry(tree: app_commands.CommandTree) -> None:
             continue
 
         description = remove_admin_prefix(command.description)
-        korean_description = description
+        korean_description = COMMAND_DESCRIPTION_KO.get(
+            command.qualified_name, description
+        )
         english_description = english_copy(
             description, f"Run the {command_path} action"
         )
@@ -210,6 +298,10 @@ def configure_command_registry(tree: app_commands.CommandTree) -> None:
         for parameter in command.parameters:
             parent_parameter = parameter._Parameter__parent
             korean_parameter_description = parameter.description
+            if not re.search(r"[가-힣]", korean_parameter_description):
+                korean_parameter_description = PARAMETER_DESCRIPTIONS_KO.get(
+                    parameter.name, "값을 입력하세요"
+                )
             english_parameter_description = english_copy(
                 korean_parameter_description,
                 f"Enter {parameter.name.replace('_', ' ')}",
@@ -596,6 +688,35 @@ async def sync_tier(guild_id: str, user_id: str, tier_key: str) -> None:
         )
 
 
+class BankCommandTranslator(app_commands.Translator):
+    async def translate(
+        self,
+        string: app_commands.locale_str,
+        locale: discord.Locale,
+        context: app_commands.TranslationContext,
+    ) -> str | None:
+        if locale is not discord.Locale.korean:
+            return None
+
+        location = context.location
+        data = context.data
+        if location in {
+            app_commands.TranslationContextLocation.command_description,
+            app_commands.TranslationContextLocation.group_description,
+        }:
+            return COMMAND_DESCRIPTION_COPIES.get(
+                data.qualified_name, {}
+            ).get("ko")
+
+        if location == app_commands.TranslationContextLocation.parameter_description:
+            command = data.command
+            return COMMAND_PARAMETER_DESCRIPTION_COPIES.get(
+                (command.qualified_name, data.name), {}
+            ).get("ko")
+
+        return None
+
+
 class BankCommandTree(app_commands.CommandTree):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.guild_id and not interaction.user.bot:
@@ -637,6 +758,19 @@ class BankBot(discord.Client):
         if not DATABASE_URL:
             raise RuntimeError("DATABASE_URL must be set.")
         pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=8)
+        await self.tree.set_translator(BankCommandTranslator())
+
+        guild_id = configured_discord_guild_id()
+        if guild_id is not None:
+            guild = discord.Object(id=guild_id)
+            self.tree.copy_global_to(guild=guild)
+            guild_synced = await self.tree.sync(guild=guild)
+            logger.info(
+                "Synced %s application commands to configured server %s",
+                len(guild_synced),
+                guild_id,
+            )
+
         synced = await self.tree.sync()
         logger.info(
             "Connected setup complete; synced %s application commands", len(synced)
@@ -6258,8 +6392,8 @@ def register_menu_command_tree(tree: app_commands.CommandTree) -> None:
 
 
 organize_command_categories(bot.tree)
-configure_command_registry(bot.tree)
 register_menu_command_tree(bot.tree)
+configure_command_registry(bot.tree)
 
 
 async def main() -> None:

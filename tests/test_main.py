@@ -71,6 +71,22 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             ):
                 main.require_discord_token()
 
+    def test_discord_guild_id_is_optional_and_validated(self):
+        with patch.dict(os.environ, {"DISCORD_GUILD_ID": ""}):
+            self.assertIsNone(main.configured_discord_guild_id())
+
+        with patch.dict(os.environ, {"DISCORD_GUILD_ID": "123456789012345678"}):
+            self.assertEqual(
+                main.configured_discord_guild_id(), 123456789012345678
+            )
+
+        for value in ("not-a-server-id", "0", "-12"):
+            with self.subTest(value=value), patch.dict(
+                os.environ, {"DISCORD_GUILD_ID": value}
+            ):
+                with self.assertRaises(RuntimeError):
+                    main.configured_discord_guild_id()
+
     def test_normalizes_stock_names_without_tickers(self):
         self.assertEqual(main.normalize_name("  Café   Market "), "café   market")
 
@@ -460,6 +476,61 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotRegex(parameter.description, r"[가-힣]")
                 for choice in parameter.choices:
                     self.assertNotRegex(choice.name, r"[가-힣]")
+
+    async def test_discord_korean_locale_translates_command_and_option_descriptions(
+        self,
+    ):
+        translator = main.BankCommandTranslator()
+        group = main.bot.tree.get_command("profile")
+        group_context = main.app_commands.TranslationContext(
+            main.app_commands.TranslationContextLocation.group_description,
+            group,
+        )
+        translated_group = await translator.translate(
+            main.app_commands.locale_str(group.description),
+            main.discord.Locale.korean,
+            group_context,
+        )
+
+        self.assertEqual(
+            translated_group,
+            main.localized_command_description(group, "ko"),
+        )
+        self.assertRegex(translated_group, r"[가-힣]")
+        self.assertIsNone(
+            await translator.translate(
+                main.app_commands.locale_str(group.description),
+                main.discord.Locale.american_english,
+                group_context,
+            )
+        )
+
+        command = main.ACTION_COMMANDS_BY_PATH["savings transfer"]
+        parameter = command.parameters[0]
+        parameter_context = main.app_commands.TranslationContext(
+            main.app_commands.TranslationContextLocation.parameter_description,
+            parameter,
+        )
+        translated_parameter = await translator.translate(
+            main.app_commands.locale_str(parameter.description),
+            main.discord.Locale.korean,
+            parameter_context,
+        )
+
+        self.assertEqual(
+            translated_parameter,
+            main.localized_parameter_description(command, parameter, "ko"),
+        )
+        self.assertRegex(translated_parameter, r"[가-힣]")
+
+    def test_all_registered_command_and_parameter_korean_descriptions_exist(self):
+        for path, descriptions in main.COMMAND_DESCRIPTION_COPIES.items():
+            with self.subTest(command=path):
+                self.assertRegex(descriptions["ko"], r"[가-힣]")
+
+        for key, descriptions in main.COMMAND_PARAMETER_DESCRIPTION_COPIES.items():
+            with self.subTest(parameter=key):
+                self.assertRegex(descriptions["ko"], r"[가-힣]")
 
     def test_tier_benefits_use_one_command_and_select_menu(self):
         command = main.ACTION_COMMANDS_BY_PATH["admin tier-benefits"]
