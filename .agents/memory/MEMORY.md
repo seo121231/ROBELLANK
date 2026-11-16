@@ -2,3 +2,4 @@
 - [`.replit` validation](dot-replit-validation.md) — workflow config changes must go through the validated replacement helper, not direct file edits.
 - [discord.py group command removal](discord-command-group-removal.md) — `Group.remove_command` may mutate the tree but return `None`; retrieve the child first.
 - [Discord tier role tags](discord-tier-role-tags.md) — read bracketed tier tags exactly: bronze–ace lowercase, `[VIP]` uppercase.
+- [Discord bot installation scope](discord-bot-install-scope.md) — a guild install with only `applications.commands` syncs commands but does not add the bot to the server.
