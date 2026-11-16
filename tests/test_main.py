@@ -101,6 +101,11 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(main.credit_loan_limit(100), 200_000)
         self.assertEqual(main.credit_loan_limit(50, 75_000), 175_000)
 
+    def test_stock_sell_fee_is_eight_percent_rounded_to_nearest_bell(self):
+        self.assertEqual(main.calculate_stock_sell_fee(10_000), 800)
+        self.assertEqual(main.calculate_stock_sell_fee(6), 0)
+        self.assertEqual(main.calculate_stock_sell_fee(7), 1)
+
     def test_tier_detection_accepts_role_names_and_uses_highest_tier(self):
         member = SimpleNamespace(
             roles=[

@@ -556,6 +556,13 @@ def credit_loan_limit(credit_score: int, platinum_bonus: int = 0) -> int:
     return credit_score * 2_000 + platinum_bonus
 
 
+STOCK_SELL_FEE_PERCENT = 8
+
+
+def calculate_stock_sell_fee(gross_amount: int) -> int:
+    return (gross_amount * STOCK_SELL_FEE_PERCENT + 50) // 100
+
+
 async def base_currency(
     conn: asyncpg.Connection, guild_id: str, *, lock: bool = False
 ) -> asyncpg.Record:
@@ -1745,7 +1752,7 @@ async def place_order(
                 fill = min(remaining, int(resting["remaining"]))
                 execution_price = int(resting["limit_price"])
                 gross = fill * execution_price
-                fee = (gross * 75 + 500) // 1000
+                fee = calculate_stock_sell_fee(gross)
                 buyer_id = acct["id"] if side == "buy" else resting["account_id"]
                 seller_id = acct["id"] if side == "sell" else resting["account_id"]
                 if side == "buy" and limit_price > execution_price:
