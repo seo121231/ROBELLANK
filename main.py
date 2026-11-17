@@ -1865,6 +1865,33 @@ async def place_order(
     }
 
 
+async def _submit_stock_order(
+    interaction: discord.Interaction,
+    stock: str,
+    shares: int,
+    limit_price: int,
+    side: str,
+) -> None:
+    async def run() -> None:
+        result = await place_order(
+            require_guild(interaction),
+            str(interaction.user.id),
+            stock,
+            side,
+            shares,
+            limit_price,
+        )
+        action = "매수" if side == "buy" else "매도"
+        await send_private(
+            interaction,
+            f"**{result['stock']['name']}** 주문 #{result['order_id']} · {action} {fmt(shares)}주\n"
+            f"지정가 {fmt(limit_price)} · 즉시 체결 {fmt(result['filled'])}주 · "
+            f"미체결 {fmt(result['remaining'])}주.",
+        )
+
+    await safe_command(interaction, run)
+
+
 @stock_group.command(name="buy", description="지정가 매수 주문을 냅니다")
 async def stock_buy(
     interaction: discord.Interaction,
@@ -1872,21 +1899,7 @@ async def stock_buy(
     shares: app_commands.Range[int, 1, 2147483647],
     limit_price: app_commands.Range[int, 1, 2147483647],
 ) -> None:
-    async def run():
-        result = await place_order(
-            require_guild(interaction),
-            str(interaction.user.id),
-            stock,
-            "buy",
-            shares,
-            limit_price,
-        )
-        await send_private(
-            interaction,
-            f"**{result['stock']['name']}** 주문 #{result['order_id']} · 매수 {fmt(shares)}주\n지정가 {fmt(limit_price)} · 즉시 체결 {fmt(result['filled'])}주 · 미체결 {fmt(result['remaining'])}주.",
-        )
-
-    await safe_command(interaction, run)
+    await _submit_stock_order(interaction, stock, shares, limit_price, "buy")
 
 
 @stock_group.command(name="sell", description="보유 주식의 지정가 매도 주문을 냅니다")
@@ -1896,21 +1909,7 @@ async def stock_sell(
     shares: app_commands.Range[int, 1, 2147483647],
     limit_price: app_commands.Range[int, 1, 2147483647],
 ) -> None:
-    async def run():
-        result = await place_order(
-            require_guild(interaction),
-            str(interaction.user.id),
-            stock,
-            "sell",
-            shares,
-            limit_price,
-        )
-        await send_private(
-            interaction,
-            f"**{result['stock']['name']}** 주문 #{result['order_id']} · 매도 {fmt(shares)}주\n지정가 {fmt(limit_price)} · 즉시 체결 {fmt(result['filled'])}주 · 미체결 {fmt(result['remaining'])}주.",
-        )
-
-    await safe_command(interaction, run)
+    await _submit_stock_order(interaction, stock, shares, limit_price, "sell")
 
 
 @stock_group.command(name="orders", description="내 미체결 주문을 확인합니다")
@@ -2018,7 +2017,7 @@ async def portfolio(interaction: discord.Interaction) -> None:
         embed = discord.Embed(
             title="내 가상주식 포트폴리오",
             description="현재 기준가로 계산한 참고 평가액입니다. 실제 매도 금액과 다를 수 있습니다.",
-        color=BANK_GOLD,
+            color=BANK_GOLD,
         )
         for row in rows[:24]:
             embed.add_field(

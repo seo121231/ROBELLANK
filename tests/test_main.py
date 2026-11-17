@@ -106,6 +106,39 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(main.calculate_stock_sell_fee(6), 0)
         self.assertEqual(main.calculate_stock_sell_fee(7), 1)
 
+    async def test_buy_and_sell_commands_share_stock_order_submission(self):
+        interaction = SimpleNamespace(user=SimpleNamespace(id=123))
+        order_result = {
+            "stock": {"name": "테스트"},
+            "order_id": 7,
+            "filled": 2,
+            "remaining": 3,
+        }
+
+        with (
+            patch.object(main, "require_guild", return_value="guild"),
+            patch.object(
+                main, "place_order", new=AsyncMock(return_value=order_result)
+            ) as place_order,
+            patch.object(main, "send_private", new=AsyncMock()) as send_private,
+        ):
+            for side, action in (("buy", "매수"), ("sell", "매도")):
+                with self.subTest(side=side):
+                    await main._submit_stock_order(
+                        interaction, "테스트", 5, 100, side
+                    )
+
+                    place_order.assert_awaited_with(
+                        "guild", "123", "테스트", side, 5, 100
+                    )
+                    send_private.assert_awaited_with(
+                        interaction,
+                        f"**테스트** 주문 #7 · {action} 5주\n"
+                        "지정가 100 · 즉시 체결 2주 · 미체결 3주.",
+                    )
+                    place_order.reset_mock()
+                    send_private.reset_mock()
+
     def test_tier_detection_accepts_role_names_and_uses_highest_tier(self):
         member = SimpleNamespace(
             roles=[
