@@ -836,6 +836,7 @@ async def set_user_language(user_id: str | int, language: str) -> None:
 
 def localize_embed(embed: discord.Embed, language: str) -> discord.Embed:
     localized = discord.Embed.from_dict(embed.to_dict())
+    localized.color = discord.Color(BANK_GOLD)
     if localized.title:
         localized.title = translate_known_text(localized.title, language)
     if localized.description:
@@ -849,6 +850,10 @@ def localize_embed(embed: discord.Embed, language: str) -> discord.Embed:
             icon_url=localized.footer.icon_url,
         )
     return localized
+
+
+def build_message_embed(content: str) -> discord.Embed:
+    return discord.Embed(description=content[:1900] or "\u200b", color=BANK_GOLD)
 
 
 async def send_public(
@@ -865,6 +870,11 @@ async def send_public(
         if len(content) > 1900:
             omitted = "…some content was omitted." if language == "en" else "…내용이 길어 일부를 생략했습니다."
             content = content[:1880] + "\n" + omitted
+        if embed is None:
+            embed = build_message_embed(content)
+            content = None
+    elif embed is None:
+        embed = build_message_embed("\u200b")
     if embed is not None:
         embed = localize_embed(embed, language)
     message_options: dict[str, object] = {"ephemeral": False}
@@ -1449,7 +1459,7 @@ def table_embed(rows: list[asyncpg.Record], page: int) -> discord.Embed:
         + "\n".join(lines)
         + "\n```\n"
         + "기준가·시가총액은 참고값이며 실제 체결가는 주문 매칭 결과에 따릅니다.",
-        color=0x207E66,
+        color=BANK_GOLD,
     )
     embed.set_footer(text=f"상장 종목 {len(rows)}개 · 이름순 정렬")
     return embed
@@ -1468,7 +1478,7 @@ async def stock_list(interaction: discord.Interaction) -> None:
                 "종목 이름으로 검색·주문합니다. 기준가는 참고 가격이며 "
                 "체결 가격은 주문 매칭 결과에 따릅니다."
             ),
-            color=0x207E66,
+            color=BANK_GOLD,
         )
         for stock in rows[:24]:
             change = (
@@ -1599,7 +1609,7 @@ async def stock_quote(interaction: discord.Interaction, stock: str) -> None:
         embed = discord.Embed(
             title=row["name"],
             description=row["description"] or "종목 소개가 아직 등록되지 않았습니다.",
-            color=0x207E66,
+        color=BANK_GOLD,
         )
         embed.add_field(
             name="현재 기준가",
@@ -2008,7 +2018,7 @@ async def portfolio(interaction: discord.Interaction) -> None:
         embed = discord.Embed(
             title="내 가상주식 포트폴리오",
             description="현재 기준가로 계산한 참고 평가액입니다. 실제 매도 금액과 다를 수 있습니다.",
-            color=0x207E66,
+        color=BANK_GOLD,
         )
         for row in rows[:24]:
             embed.add_field(
@@ -2484,7 +2494,8 @@ async def start_action_command(
     }
     action = simple_forms.get(command.qualified_name)
     if action == "transfer":
-        await interaction.response.send_message(
+        await send_public(
+            interaction,
             embed=build_member_select_embed(language),
             view=MemberSelectView(
                 owner_id,
@@ -2506,7 +2517,8 @@ async def start_action_command(
         if parameter.type == discord.AppCommandOptionType.user
     ]
     if user_parameters:
-        await interaction.response.send_message(
+        await send_public(
+            interaction,
             embed=build_member_select_embed(language, user_parameters[0].name),
             view=MemberSelectView(
                 owner_id,
@@ -2520,13 +2532,15 @@ async def start_action_command(
         parameter for parameter in command.parameters if parameter.choices
     ]
     if choice_parameters:
-        await interaction.response.send_message(
+        await send_public(
+            interaction,
             "Choose the required options, then continue."
             if language == "en"
             else "필요한 항목을 선택한 뒤 계속을 누르세요.",
             view=ChoiceActionView(
                 owner_id, command, choice_parameters, language=language
             ),
+            language=language,
         )
         return
     await interaction.response.send_modal(
@@ -3169,13 +3183,15 @@ class CommandActionModal(discord.ui.Modal):
                     "language": self.language,
                     "expires_at": datetime.now(UTC) + timedelta(minutes=5),
                 }
-                await interaction.response.send_message(
+                await send_public(
+                    interaction,
                     "Continue the form to enter the remaining details."
                     if self.language == "en"
                     else "나머지 내용을 입력하려면 계속을 누르세요.",
                     view=ContinueActionView(
                         self.owner_id, state_id, language=self.language
                     ),
+                    language=self.language,
                 )
                 return
             if self.state_id:
@@ -3299,12 +3315,11 @@ class MemberSelectView(discord.ui.View):
         ]
         if choice_parameters:
             await interaction.response.edit_message(
-                content=(
+                embed=build_message_embed(
                     "Choose the required options, then continue."
                     if self.language == "en"
                     else "필요한 항목을 선택한 뒤 계속을 누르세요."
                 ),
-                embed=None,
                 view=ChoiceActionView(
                     self.owner_id,
                     self.command,
@@ -4252,9 +4267,11 @@ class ConfirmActionView(discord.ui.View):
         language = await get_user_language(interaction.user.id)
         if not has_server_admin_access(interaction.user):
             await interaction.response.edit_message(
-                content=translate_message(
-                    "관리자 권한이 확인되지 않아 실행하지 않았습니다.",
-                    language,
+                embed=build_message_embed(
+                    translate_message(
+                        "관리자 권한이 확인되지 않아 실행하지 않았습니다.",
+                        language,
+                    )
                 ),
                 view=None,
             )
@@ -4262,20 +4279,24 @@ class ConfirmActionView(discord.ui.View):
         try:
             result = await self.action()
             await interaction.response.edit_message(
-                content=translate_message(result, language), view=None
+                embed=build_message_embed(translate_message(result, language)),
+                view=None,
             )
         except ValueError as error:
             language = await get_user_language(interaction.user.id)
             await interaction.response.edit_message(
-                content=translate_message(str(error), language), view=None
+                embed=build_message_embed(translate_message(str(error), language)),
+                view=None,
             )
         except Exception:
             logger.exception("Confirmed action failed")
             language = await get_user_language(interaction.user.id)
             await interaction.response.edit_message(
-                content=translate_message(
-                    "작업을 완료하지 못했습니다. 관리자에게 문의하세요.",
-                    language,
+                embed=build_message_embed(
+                    translate_message(
+                        "작업을 완료하지 못했습니다. 관리자에게 문의하세요.",
+                        language,
+                    )
                 ),
                 view=None,
             )
@@ -4285,7 +4306,8 @@ class ConfirmActionView(discord.ui.View):
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
         await interaction.response.edit_message(
-            content="작업을 취소했습니다.", view=None
+            embed=build_message_embed("작업을 취소했습니다."),
+            view=None,
         )
 
 
@@ -4719,7 +4741,8 @@ class TierSettingModal(discord.ui.Modal):
             or not permissions
             or not permissions.administrator
         ):
-            await interaction.response.send_message(
+            await send_public(
+                interaction,
                 "서버 관리자만 설정을 저장할 수 있습니다.",
             )
             return
@@ -4752,11 +4775,12 @@ class TierSettingModal(discord.ui.Modal):
                 reason,
             )
         except ValueError as error:
-            await interaction.response.send_message(str(error))
+            await send_public(interaction, str(error))
             return
         except asyncpg.PostgresError:
             logger.exception("Tier settings update failed")
-            await interaction.response.send_message(
+            await send_public(
+                interaction,
                 "데이터베이스 문제로 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.",
             )
             return
@@ -4772,7 +4796,7 @@ class TierSettingModal(discord.ui.Modal):
                 f"{TIER_SETTING_LABELS[self.key]}을(를) "
                 f"{tier_setting_display(self.key, {**values, **{self.key: value}})}로 저장했습니다."
             )
-        await interaction.response.send_message(confirmation)
+        await send_public(interaction, confirmation)
 
 
 class TierSettingsView(discord.ui.View):
@@ -4813,13 +4837,15 @@ class TierSettingsView(discord.ui.View):
             interaction.user.id != self.owner_id
             or str(interaction.guild_id or "") != self.guild_id
         ):
-            await interaction.response.send_message(
+            await send_public(
+                interaction,
                 "이 설정 화면을 연 관리자만 사용할 수 있습니다.",
             )
             return False
         permissions = getattr(interaction.user, "guild_permissions", None)
         if not permissions or not permissions.administrator:
-            await interaction.response.send_message(
+            await send_public(
+                interaction,
                 "서버 관리자만 설정을 변경할 수 있습니다.",
             )
             return False
@@ -4834,15 +4860,17 @@ async def tier_settings_command(interaction: discord.Interaction) -> None:
     try:
         guild_id = require_guild(interaction)
         settings = dict(await load_tier_settings(guild_id))
-        await interaction.response.send_message(
+        await send_public(
+            interaction,
             embed=build_tier_settings_embed(settings),
             view=TierSettingsView(interaction.user.id, guild_id, settings),
         )
     except ValueError as error:
-        await interaction.response.send_message(str(error))
+        await send_public(interaction, str(error))
     except asyncpg.PostgresError:
         logger.exception("Tier settings panel failed to load")
-        await interaction.response.send_message(
+        await send_public(
+            interaction,
             "데이터베이스 문제로 설정을 불러오지 못했습니다.",
         )
 
@@ -5188,7 +5216,8 @@ async def send_announcement(guild_id: str, content: str) -> bool:
             return False
     if isinstance(channel, discord.abc.Messageable):
         await channel.send(
-            content[:1900], allowed_mentions=discord.AllowedMentions.none()
+            embed=build_message_embed(content),
+            allowed_mentions=discord.AllowedMentions.none(),
         )
         return True
     return False

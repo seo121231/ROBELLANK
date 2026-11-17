@@ -751,10 +751,13 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             await main.set_user_language(123456, "en")
             await main.send_public(interaction, source)
 
+        message = response.send_message.await_args.kwargs
+        self.assertNotIn("content", message)
         self.assertEqual(
-            response.send_message.await_args.kwargs["content"],
+            message["embed"].description,
             "You do not have an account. Open `/menu` and choose account registration first.",
         )
+        self.assertEqual(message["embed"].color.value, main.BANK_GOLD)
 
     async def test_send_public_does_not_pass_an_empty_view(self):
         pool = FakePool()
@@ -771,9 +774,29 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             await main.send_public(interaction, "정수를 입력하세요.")
 
         message_options = response.send_message.await_args.kwargs
-        self.assertEqual(message_options["content"], "정수를 입력하세요.")
+        self.assertNotIn("content", message_options)
+        self.assertEqual(message_options["embed"].description, "정수를 입력하세요.")
+        self.assertEqual(message_options["embed"].color.value, main.BANK_GOLD)
         self.assertNotIn("view", message_options)
         self.assertFalse(message_options["ephemeral"])
+
+    async def test_send_public_recolors_existing_embeds_gold(self):
+        response = SimpleNamespace(
+            is_done=lambda: False,
+            send_message=AsyncMock(),
+        )
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=123456),
+            response=response,
+        )
+        existing = main.discord.Embed(description="Stock quote", color=0x207E66)
+
+        with patch.object(main, "get_user_language", AsyncMock(return_value="en")):
+            await main.send_public(interaction, embed=existing)
+
+        sent_embed = response.send_message.await_args.kwargs["embed"]
+        self.assertEqual(sent_embed.description, "Stock quote")
+        self.assertEqual(sent_embed.color.value, main.BANK_GOLD)
 
     def test_bot_does_not_send_ephemeral_interaction_messages(self):
         source = ast.parse(Path(main.__file__).read_text())
@@ -895,7 +918,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
 
         action.assert_not_awaited()
         self.assertEqual(
-            interaction.response.edit_message.await_args.kwargs["content"],
+            interaction.response.edit_message.await_args.kwargs["embed"].description,
             "관리자 권한이 확인되지 않아 실행하지 않았습니다.",
         )
 
@@ -919,7 +942,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             await view.children[0].callback(interaction)
 
         self.assertEqual(
-            interaction.response.edit_message.await_args.kwargs["content"],
+            interaction.response.edit_message.await_args.kwargs["embed"].description,
             "기본재화는 사용 중지할 수 없습니다.",
         )
 
