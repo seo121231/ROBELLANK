@@ -629,7 +629,7 @@ async def account(
         user_id,
     )
     if not row:
-        raise ValueError("계좌가 없습니다. 먼저 `/profile register`를 실행하세요.")
+        raise ValueError("계좌가 없습니다. `/profile`에서 계좌 기능을 선택하세요.")
     if row["frozen"] and not allow_frozen:
         raise ValueError("계좌가 동결되어 거래할 수 없습니다. 관리자에게 문의하세요.")
     return row
@@ -1527,9 +1527,11 @@ async def stock_list(interaction: discord.Interaction) -> None:
                 inline=False,
             )
         embed.set_footer(
-            text=f"총 {len(rows)}종목 · 상세 조회: /stocks stock quote"
-            if len(rows) <= 24
-            else f"총 {len(rows)}종목 · 목록에는 이름순 24종목 표시"
+            text=(
+                f"총 {len(rows)}종목 · 상세 조회는 /stocks에서 선택"
+                if len(rows) <= 24
+                else f"총 {len(rows)}종목 · 목록에는 이름순 24종목 표시"
+            )
         )
         await send_public(interaction, embed=embed)
 
@@ -2114,7 +2116,8 @@ def build_category_page_embed(
     start = page * CATEGORY_PAGE_SIZE
     page_commands = commands[start : start + CATEGORY_PAGE_SIZE]
     lines = [
-        f"/{command.qualified_name} — {localized_command_description(command, language)}"
+        f"{command.qualified_name.removeprefix(category_name + ' ')} — "
+        f"{localized_command_description(command, language)}"
         for command in page_commands
     ]
     embed = discord.Embed(
@@ -2141,32 +2144,6 @@ def build_member_select_embed(
             "Choose the server member for this action."
             if language == "en"
             else f"이 작업의 {label}을(를) 아래 목록에서 선택하세요."
-        ),
-        color=BANK_GOLD,
-    )
-
-
-def build_main_menu_embed(language: str) -> discord.Embed:
-    if language == "en":
-        return discord.Embed(
-            title="ROBELLANK Bank",
-            description=(
-                "Use the slash command group that matches what you need.\n"
-                "Bank: `/profile` · `/savings` · `/loan`\n"
-                "Items: `/storage` · `/requests`\n"
-                "Stocks: `/stocks` · `/market`\n"
-                "Admin: `/admin` · Help: `/help` · Language: `/language`"
-            ),
-            color=BANK_GOLD,
-        )
-    return discord.Embed(
-        title="ROBELLANK 은행",
-        description=(
-            "필요한 기능에 맞는 슬래시 명령어 범주를 사용하세요.\n"
-            "은행: `/profile` · `/savings` · `/loan`\n"
-            "아이템: `/storage` · `/requests`\n"
-            "주식: `/stocks` · `/market`\n"
-            "관리자: `/admin` · 도움말: `/help` · 언어: `/language`"
         ),
         color=BANK_GOLD,
     )
@@ -2209,9 +2186,11 @@ def build_stock_list_embed(
             inline=False,
         )
     if english:
-        embed.set_footer(text=f"{len(rows)} listed stocks")
+        embed.set_footer(
+            text=f"{len(rows)} listed stocks · choose an action from /stocks"
+        )
     else:
-        embed.set_footer(text=f"총 {len(rows)}종목 · 상세 조회: /stocks stock quote")
+        embed.set_footer(text=f"총 {len(rows)}종목 · 상세 조회는 /stocks에서 선택")
     return embed
 
 
@@ -2288,192 +2267,6 @@ class LanguageSelectView(discord.ui.View):
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
         await self.select_language(interaction, "en")
-
-
-class BankMenuView(discord.ui.View):
-    def __init__(self, owner_id: int, language: str):
-        super().__init__(timeout=300)
-        self.owner_id = owner_id
-        english = language == "en"
-        category_select = discord.ui.Select(
-            placeholder="Choose a category" if english else "명령 범주 선택",
-            min_values=1,
-            max_values=1,
-            options=[
-                discord.SelectOption(
-                    label=CATEGORY_LABELS[name][language],
-                    value=name,
-                )
-                for name, _ in COMMAND_CATEGORIES
-            ],
-        )
-
-        async def select_category(interaction: discord.Interaction) -> None:
-            await self.handle_action(
-                interaction, f"category:{category_select.values[0]}"
-            )
-
-        category_select.callback = select_category
-        self.add_item(category_select)
-        actions = [
-            (
-                "account",
-                "Account" if english else "계정",
-                discord.ButtonStyle.primary,
-            ),
-            (
-                "transfer",
-                "Transfer" if english else "송금",
-                discord.ButtonStyle.primary,
-            ),
-            (
-                "deposit",
-                "Deposit" if english else "예금",
-                discord.ButtonStyle.success,
-            ),
-            (
-                "withdraw",
-                "Withdraw" if english else "출금",
-                discord.ButtonStyle.secondary,
-            ),
-            (
-                "exchange",
-                "Exchange" if english else "환전",
-                discord.ButtonStyle.secondary,
-            ),
-            (
-                "stock-list",
-                "Stock list" if english else "주식 목록",
-                discord.ButtonStyle.primary,
-            ),
-            (
-                "portfolio",
-                "Portfolio" if english else "포트폴리오",
-                discord.ButtonStyle.primary,
-            ),
-            ("help", "Help" if english else "도움말", discord.ButtonStyle.primary),
-            (
-                "menu",
-                "Main menu" if english else "메인 메뉴",
-                discord.ButtonStyle.secondary,
-            ),
-            (
-                "language",
-                "Language: English" if english else "언어: 한국어",
-                discord.ButtonStyle.success,
-            ),
-        ]
-        for action, label, style in actions:
-            button = discord.ui.Button(
-                label=label, style=style, custom_id=f"robellank-menu:{action}"
-            )
-
-            async def callback(
-                interaction: discord.Interaction, selected_action: str = action
-            ) -> None:
-                await self.handle_action(interaction, selected_action)
-
-            button.callback = callback
-            self.add_item(button)
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.owner_id:
-            await send_public(
-                interaction,
-                "이 메뉴는 명령을 실행한 사용자만 사용할 수 있습니다.",
-            )
-            return False
-        return True
-
-    async def handle_action(
-        self, interaction: discord.Interaction, action: str
-    ) -> None:
-        try:
-            language = await get_user_language(interaction.user.id)
-            if action == "language":
-                await interaction.response.edit_message(
-                    embed=build_language_embed(language),
-                    view=LanguageSelectView(self.owner_id),
-                )
-                return
-            elif action == "help":
-                embed = build_help_embed(language)
-            elif action == "stocks":
-                rows = await list_stocks(require_guild(interaction))
-                embed = build_stock_list_embed(rows, language)
-            elif action.startswith("category:"):
-                category_name = action.removeprefix("category:")
-                if category_name == "admin" and not has_server_admin_access(
-                    interaction.user
-                ):
-                    await send_public(
-                        interaction,
-                        "이 메뉴는 서버 관리자만 사용할 수 있습니다.",
-                        language=language,
-                    )
-                    return
-                embed = build_category_embed(
-                    category_name, language
-                )
-                next_view: discord.ui.View | None = CategoryActionView(
-                    self.owner_id, language, category_name
-                )
-            elif action in {
-                "transfer",
-                "deposit",
-                "withdraw",
-                "exchange",
-            }:
-                if action == "transfer":
-                    await interaction.response.edit_message(
-                        embed=build_member_select_embed(language),
-                        view=MemberSelectView(
-                            self.owner_id,
-                            command=get_command_by_path("savings transfer"),
-                            action="transfer",
-                            language=language,
-                        ),
-                    )
-                    return
-                await interaction.response.send_modal(
-                    BankActionModal(
-                        interaction.user.id, action, language=language
-                    )
-                )
-                return
-            elif action in MENU_COMMAND_PATHS:
-                await invoke_menu_command(
-                    interaction,
-                    MENU_COMMAND_PATHS[action],
-                    **MENU_COMMAND_ARGUMENTS.get(action, {}),
-                )
-                return
-            else:
-                embed = build_main_menu_embed(language)
-            await interaction.response.edit_message(
-                embed=localize_embed(embed, language),
-                view=(
-                    None
-                    if action == "help"
-                    else next_view
-                    if action.startswith("category:")
-                    else BankMenuView(interaction.user.id, language)
-                ),
-            )
-        except Exception:
-            logger.exception("Bank menu action failed")
-            await send_public(
-                interaction,
-                "메뉴를 열지 못했습니다. 다시 시도하거나 관리자에게 문의하세요.",
-            )
-
-
-MENU_COMMAND_PATHS = {
-    "account": "profile balance",
-    "stock-list": "stocks stock list",
-    "portfolio": "stocks portfolio",
-}
-MENU_COMMAND_ARGUMENTS: dict[str, dict[str, object]] = {"account": {"user": None}}
 
 
 def get_command_by_path(path: str) -> app_commands.Command:
@@ -2919,7 +2712,7 @@ class CategoryActionView(discord.ui.View):
         self.add_item(run_button)
 
         back_button = discord.ui.Button(
-            label="Back to menu" if language == "en" else "메뉴로 돌아가기",
+            label="Reset actions" if language == "en" else "다른 기능 선택",
             style=discord.ButtonStyle.secondary,
             custom_id=f"robellank-action-back:{category}",
             row=2,
@@ -2929,9 +2722,14 @@ class CategoryActionView(discord.ui.View):
             current_language = await get_user_language(interaction.user.id)
             await interaction.response.edit_message(
                 embed=localize_embed(
-                    build_main_menu_embed(current_language), current_language
+                    build_category_page_embed(
+                        self.category, current_language, 0
+                    ),
+                    current_language,
                 ),
-                view=BankMenuView(self.owner_id, current_language),
+                view=CategoryActionView(
+                    self.owner_id, current_language, self.category, 0
+                ),
             )
 
         back_button.callback = go_back
@@ -6509,7 +6307,6 @@ def resolve_announcement_channel(
     name="channel", description="관리자 전용 · 시세·뉴스 공지 채널을 설정합니다"
 )
 @app_commands.checks.has_permissions(administrator=True)
-@app_commands.autocomplete(channel=announcement_channel_autocomplete)
 async def market_channel(interaction: discord.Interaction, channel: str) -> None:
     async def run():
         guild = interaction.guild
@@ -6961,64 +6758,50 @@ def register_menu_command_tree(tree: app_commands.CommandTree) -> None:
             ACTION_COMMANDS_BY_CATEGORY.setdefault(category, []).append(command)
 
 
-def register_command_autocomplete() -> None:
-    bindings = {
-        "profile leaderboard": {"currency": currency_autocomplete},
-        "savings transfer": {"currency": currency_autocomplete},
-        "savings exchange": {
-            "from_currency": currency_autocomplete,
-            "to": currency_autocomplete,
-        },
-        "savings deposit": {"currency": currency_autocomplete},
-        "loan request": {"currency": credit_loan_currency_autocomplete},
-        "loan repay": {"loan_id": personal_loan_autocomplete},
-        "loan extend": {"loan_id": extendable_loan_autocomplete},
-        "stocks stock quote": {"stock": listed_stock_autocomplete},
-        "stocks stock buy": {"stock": listed_stock_autocomplete},
-        "stocks stock sell": {"stock": listed_stock_autocomplete},
-        "stocks stock cancel": {"order_id": order_id_autocomplete},
-        "admin mint": {"currency": currency_autocomplete},
-        "admin confiscate": {"currency": currency_autocomplete},
-        "admin supply": {"currency": currency_autocomplete},
-        "admin currency create": {"name": admin_currency_name_autocomplete},
-        "admin currency setbase": {"currency": currency_autocomplete},
-        "admin currency setvalue": {"currency": currency_autocomplete},
-        "admin currency setrate": {"currency": currency_autocomplete},
-        "admin currency remove": {"currency": currency_autocomplete},
-        "admin currency delete": {"currency": currency_autocomplete},
-        "admin loan approve": {"loan_id": pending_credit_loan_autocomplete},
-        "admin loan collateral-approve": {
-            "loan_id": pending_collateral_loan_autocomplete
-        },
-        "admin loan reject": {"loan_id": pending_loan_autocomplete},
-        "admin loan collateral-return": {
-            "loan_id": returnable_collateral_loan_autocomplete
-        },
-        "admin requests update": {"request_id": request_id_autocomplete},
-        "admin market describe": {"stock": admin_stock_autocomplete},
-        "admin market issue": {"stock": admin_stock_autocomplete},
-        "admin market burn": {"stock": admin_stock_autocomplete},
-        "admin market relist": {"stock": admin_delisted_stock_autocomplete},
-        "admin market remove": {"stock": admin_listed_stock_autocomplete},
-        "admin market evaluate": {"stock": admin_stock_autocomplete},
-        "admin market publish": {"stock": market_publish_stock_autocomplete},
-        "admin market rumor": {"stock_name": admin_listed_stock_autocomplete},
-        "admin market note": {"stock": admin_stock_autocomplete},
-        "admin market officer-add": {"stock": admin_stock_autocomplete},
-        "admin market officer-remove": {"stock": admin_stock_autocomplete},
-    }
-    for path, parameters in bindings.items():
-        command = ACTION_COMMANDS_BY_PATH.get(path)
-        if command is None:
-            raise RuntimeError(f"Cannot attach autocomplete to {path!r}.")
-        for parameter, callback in parameters.items():
-            command.autocomplete(parameter)(callback)
+def register_category_commands(tree: app_commands.CommandTree) -> None:
+    def make_category_callback(category_name: str):
+        async def open_category(interaction: discord.Interaction) -> None:
+            language = await get_user_language(interaction.user.id)
+            if category_name == "admin" and not has_server_admin_access(
+                interaction.user
+            ):
+                await send_public(
+                    interaction,
+                    "이 메뉴는 서버 관리자만 사용할 수 있습니다.",
+                    language=language,
+                )
+                return
+            await send_public(
+                interaction,
+                embed=build_category_embed(category_name, language),
+                view=CategoryActionView(
+                    interaction.user.id, language, category_name
+                ),
+                language=language,
+            )
+
+        return open_category
+
+    descriptions = dict(COMMAND_CATEGORIES)
+    for category_name in descriptions:
+        previous = tree.remove_command(category_name)
+        if not isinstance(previous, app_commands.Group):
+            raise RuntimeError(
+                f"Cannot find command group {category_name!r} to expose its action picker."
+            )
+        tree.add_command(
+            app_commands.Command(
+                name=category_name,
+                description=descriptions[category_name],
+                callback=make_category_callback(category_name),
+            )
+        )
 
 
 organize_command_categories(bot.tree)
 register_menu_command_tree(bot.tree)
+register_category_commands(bot.tree)
 configure_command_registry(bot.tree)
-register_command_autocomplete()
 
 
 async def main() -> None:

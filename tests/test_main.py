@@ -259,51 +259,38 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(main.is_unscored_market_evaluation(row))
         self.assertIn("점수 미등록 · 무작위 변동", main.market_report_line(row))
 
-    def test_ten_english_slash_commands_are_registered_without_menu(self):
+    def test_ten_top_level_commands_are_category_action_pickers(self):
         commands = {
             command.name: command.to_dict(main.bot.tree)
             for command in main.bot.tree.get_commands()
         }
-        self.assertEqual(
-            set(commands),
-            {
-                "language",
-                "help",
-                "profile",
-                "storage",
-                "requests",
-                "savings",
-                "loan",
-                "stocks",
-                "market",
-                "admin",
-            },
-        )
-        self.assertEqual(len(commands), 10)
-        stock_commands = {
-            command.name for command in main.ACTION_COMMANDS_BY_CATEGORY["stocks"]
+        expected_commands = {
+            *(name for name, _ in main.COMMAND_CATEGORIES),
+            "language",
+            "help",
         }
-        self.assertIn("table", stock_commands)
-        self.assertIn(
-            "news",
-            {command.name for command in main.ACTION_COMMANDS_BY_CATEGORY["market"]},
-        )
-        groups = []
-        for root in main.bot.tree.get_commands():
-            if isinstance(root, main.app_commands.Group):
-                groups.append(root)
-                groups.extend(
-                    command
-                    for command in root.walk_commands()
-                    if isinstance(command, main.app_commands.Group)
-                )
-        self.assertTrue(all(len(group.commands) <= 25 for group in groups))
+        self.assertEqual(set(commands), expected_commands)
+        self.assertEqual(len(commands), 10)
         self.assertTrue(
             all(
-                isinstance(main.bot.tree.get_command(name), main.app_commands.Group)
-                for name, _ in main.COMMAND_CATEGORIES
+                not isinstance(command, main.app_commands.Group)
+                and command.parameters == []
+                for command in main.bot.tree.get_commands()
             )
         )
+        self.assertEqual(
+            set(main.ACTION_COMMANDS_BY_CATEGORY),
+            {name for name, _ in main.COMMAND_CATEGORIES},
+        )
+        self.assertIn("stock table", {
+            command.qualified_name.removeprefix("stocks ")
+            for command in main.ACTION_COMMANDS_BY_CATEGORY["stocks"]
+        })
+        self.assertIn("news", {
+            command.name for command in main.ACTION_COMMANDS_BY_CATEGORY["market"]
+        })
+        self.assertIsNone(main.bot.tree.get_command("bank"))
+        self.assertIsNone(main.bot.tree.get_command("menu"))
         self.assertIsNotNone(main.get_command_by_path("stocks stock buy"))
         self.assertIsNotNone(main.get_command_by_path("savings transfer"))
         self.assertIsNotNone(main.get_command_by_path("admin market create"))
@@ -356,11 +343,16 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(required_paths.issubset(main.ACTION_COMMANDS_BY_PATH))
 
-    def test_language_is_registered_and_menu_command_is_removed(self):
+    def test_category_commands_are_registered_and_menu_commands_are_removed(self):
+        profile = main.bot.tree.get_command("profile")
         menu = main.bot.tree.get_command("menu")
+        bank = main.bot.tree.get_command("bank")
         language_selector = main.bot.tree.get_command("language")
 
+        self.assertIsNotNone(profile)
+        self.assertEqual(profile.parameters, [])
         self.assertIsNone(menu)
+        self.assertIsNone(bank)
         self.assertIsNotNone(language_selector)
         self.assertEqual(len(language_selector.parameters), 1)
         self.assertEqual(
@@ -368,16 +360,21 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             {"ko", "en"},
         )
 
-    def test_menu_shows_broad_command_categories_as_text(self):
-        embed = main.build_main_menu_embed("ko")
+    def test_category_action_picker_only_contains_selected_category(self):
+        view = main.CategoryActionView(123456, "ko", "profile")
+        action_select = view.children[0]
 
-        self.assertIn("은행: `/profile` · `/savings` · `/loan`", embed.description)
-        self.assertIn("아이템: `/storage` · `/requests`", embed.description)
-        self.assertIn("주식: `/stocks` · `/market`", embed.description)
-        self.assertIn("관리자: `/admin`", embed.description)
+        self.assertEqual(
+            {option.value.split()[0] for option in action_select.options},
+            {"profile"},
+        )
 
     def test_direct_slash_commands_resolve_without_menu_shortcuts(self):
-        paths = list(main.MENU_COMMAND_PATHS.values())
+        paths = [
+            "profile balance",
+            "stocks stock list",
+            "stocks portfolio",
+        ]
         paths.extend(
             [
                 "savings transfer",
@@ -599,27 +596,27 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         translator = main.BankCommandTranslator()
-        group = main.bot.tree.get_command("profile")
-        group_context = main.app_commands.TranslationContext(
-            main.app_commands.TranslationContextLocation.group_description,
-            group,
+        command = main.bot.tree.get_command("profile")
+        command_context = main.app_commands.TranslationContext(
+            main.app_commands.TranslationContextLocation.command_description,
+            command,
         )
-        translated_group = await translator.translate(
-            main.app_commands.locale_str(group.description),
+        translated_command = await translator.translate(
+            main.app_commands.locale_str(command.description),
             main.discord.Locale.korean,
-            group_context,
+            command_context,
         )
 
         self.assertEqual(
-            translated_group,
-            main.localized_command_description(group, "ko"),
+            translated_command,
+            main.localized_command_description(command, "ko"),
         )
-        self.assertRegex(translated_group, r"[가-힣]")
+        self.assertRegex(translated_command, r"[가-힣]")
         self.assertIsNone(
             await translator.translate(
-                main.app_commands.locale_str(group.description),
+                main.app_commands.locale_str(command.description),
                 main.discord.Locale.american_english,
-                group_context,
+                command_context,
             )
         )
 
@@ -793,10 +790,10 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_language_setting_translates_known_messages_and_keeps_korean(self):
-        original = "계좌가 없습니다. 먼저 `/profile register`를 실행하세요."
+        original = "계좌가 없습니다. `/profile`에서 계좌 기능을 선택하세요."
         self.assertEqual(
             translate_message(original, "en"),
-            "You do not have an account. Run `/profile register` first.",
+            "You do not have an account. Open `/profile` and select the account action first.",
         )
         self.assertEqual(translate_message(original, "ko"), original)
 
@@ -848,6 +845,51 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             interaction, "Your bot language is now English.", language="en"
         )
 
+    async def test_each_category_command_opens_its_own_action_picker(self):
+        user = SimpleNamespace(
+            id=123456,
+            guild_permissions=SimpleNamespace(
+                administrator=True, manage_guild=False
+            ),
+            roles=[],
+        )
+        for category, _ in main.COMMAND_CATEGORIES:
+            interaction = SimpleNamespace(user=user)
+            with (
+                patch.object(
+                    main, "get_user_language", AsyncMock(return_value="ko")
+                ),
+                patch.object(main, "send_public", new=AsyncMock()) as send_public,
+            ):
+                await main.bot.tree.get_command(category).callback(interaction)
+
+            send_public.assert_awaited_once()
+            view = send_public.await_args.kwargs["view"]
+            self.assertIsInstance(view, main.CategoryActionView)
+            self.assertEqual(view.category, category)
+
+    async def test_admin_category_picker_rejects_non_admins(self):
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(
+                id=123456,
+                guild_permissions=SimpleNamespace(
+                    administrator=False, manage_guild=False
+                ),
+                roles=[],
+            )
+        )
+        with (
+            patch.object(main, "get_user_language", AsyncMock(return_value="ko")),
+            patch.object(main, "send_public", new=AsyncMock()) as send_public,
+        ):
+            await main.bot.tree.get_command("admin").callback(interaction)
+
+        send_public.assert_awaited_once_with(
+            interaction,
+            "이 메뉴는 서버 관리자만 사용할 수 있습니다.",
+            language="ko",
+        )
+
     def test_category_menu_paginates_without_truncating_admin_actions(self):
         commands = main.ACTION_COMMANDS_BY_CATEGORY["admin"]
         page_count = (
@@ -859,7 +901,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             embed = main.build_category_page_embed("admin", "ko", page)
             self.assertLessEqual(len(embed.description), main.MESSAGE_CHUNK_LIMIT)
             displayed_paths.extend(
-                line.split(" — ", 1)[0].removeprefix("/")
+                "admin " + line.split(" — ", 1)[0]
                 for line in embed.description.splitlines()
             )
 
@@ -881,7 +923,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             user=SimpleNamespace(id=123456),
             response=response,
         )
-        source = "계좌가 없습니다. 먼저 `/profile register`를 실행하세요."
+        source = "계좌가 없습니다. `/profile`에서 계좌 기능을 선택하세요."
 
         with patch.object(main, "pool", pool, create=True):
             await main.set_user_language(123456, "en")
@@ -891,7 +933,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("content", message)
         self.assertEqual(
             message["embed"].description,
-            "You do not have an account. Run `/profile register` first.",
+            "You do not have an account. Open `/profile` and select the account action first.",
         )
         self.assertEqual(message["embed"].color.value, main.BANK_GOLD)
 
@@ -982,14 +1024,14 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(ephemeral_true_calls, [])
 
-    def test_market_channel_uses_text_autocomplete_and_is_admin_only(self):
+    def test_market_channel_accepts_text_input_and_is_admin_only(self):
         channel_command = main.ACTION_COMMANDS_BY_PATH["admin market channel"]
         channel_parameter = channel_command.parameters[0]
 
         self.assertEqual(
             channel_parameter.type, main.discord.AppCommandOptionType.string
         )
-        self.assertIsNotNone(channel_parameter._Parameter__parent.autocomplete)
+        self.assertIsNone(channel_parameter._Parameter__parent.autocomplete)
         self.assertTrue(
             channel_command.description.startswith(main.ADMIN_DESCRIPTION_PREFIX)
         )
@@ -1111,38 +1153,22 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(choices, [])
         self.assertIsNone(pool.connection.fetch_query)
 
-    def test_autocomplete_is_attached_to_all_approved_lookup_inputs(self):
-        expected = {
-            "savings exchange": {"from_currency", "to"},
-            "admin currency create": {"name"},
-            "stocks stock cancel": {"order_id"},
-            "admin loan approve": {"loan_id"},
-            "admin loan collateral-approve": {"loan_id"},
-            "admin loan reject": {"loan_id"},
-            "admin loan collateral-return": {"loan_id"},
-            "admin requests update": {"request_id"},
-            "admin market relist": {"stock"},
-        }
-
-        for path, parameter_names in expected.items():
-            command = main.ACTION_COMMANDS_BY_PATH[path]
+    def test_hidden_action_forms_do_not_need_autocomplete(self):
+        for path, command in main.ACTION_COMMANDS_BY_PATH.items():
             with self.subTest(path=path):
                 for parameter in command.parameters:
-                    if parameter.name in parameter_names:
-                        self.assertTrue(
-                            callable(parameter._Parameter__parent.autocomplete),
-                            f"{path}.{parameter.name} has no autocomplete",
-                        )
+                    self.assertIsNone(parameter._Parameter__parent.autocomplete)
 
     def test_admin_commands_are_labeled_and_restricted_in_discord(self):
-        other = main.bot.tree.get_command("admin")
+        admin_root = main.bot.tree.get_command("admin")
         mint = main.ACTION_COMMANDS_BY_PATH["admin mint"]
         credit = main.ACTION_COMMANDS_BY_PATH["admin credit set"].parent
         credit_adjust = main.ACTION_COMMANDS_BY_PATH["admin credit adjust"]
         benefits = main.ACTION_COMMANDS_BY_PATH["admin tier-benefits"]
 
         self.assertTrue(mint.description.startswith(main.ADMIN_DESCRIPTION_PREFIX))
-        self.assertIsNone(other.default_permissions)
+        self.assertIsNotNone(admin_root)
+        self.assertIsNone(admin_root.default_permissions)
         self.assertIsNone(credit.default_permissions)
         self.assertTrue(mint.checks)
         self.assertTrue(

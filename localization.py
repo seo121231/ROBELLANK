@@ -67,7 +67,7 @@ STATIC_EN = {
     "서로 다른 재화를 선택하세요.": "Choose two different currencies.",
     "환전 결과가 1 미만입니다. 더 큰 금액을 입력하세요.": "The exchange result is less than 1. Enter a larger amount.",
     "이 계좌는 동결되어 거래할 수 없습니다. 관리자에게 문의하세요.": "This account is frozen. Contact a server administrator.",
-    "계좌가 없습니다. 먼저 `/profile register`를 실행하세요.": "You do not have an account. Run `/profile register` first.",
+    "계좌가 없습니다. `/profile`에서 계좌 기능을 선택하세요.": "You do not have an account. Open `/profile` and select the account action first.",
     "기준가는 참고값이며, 체결가는 주문 결과에 따라 달라집니다.": "Reference prices are estimates; final prices depend on matched orders.",
     "기준가와 시가총액은 참고값입니다. 체결가는 주문 결과에 따라 달라집니다.": "Reference prices and market cap are estimates. Final prices depend on matched orders.",
     "평가액은 기준가로 계산한 참고값입니다.": "Values are estimates based on the reference price.",

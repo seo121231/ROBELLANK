@@ -36,7 +36,7 @@ Discord 서버에서 가상 통화·계좌와 길드 가상주식 시장을 운�
 - Buy order funds are escrowed; open orders are refunded when cancelled or at the daily market close.
 - Guild stocks are found by unique display name rather than ticker; trades and holdings remain linked by immutable internal stock IDs, and stock listings carry a user-facing description.
 - Discord tier roles are assigned manually by server administrators; the bot must never grant or change roles. New bank accounts start at 50 credit points.
-- Game currency is verified by an administrator in-game and then issued to the bank through the confirmed `/admin mint` flow; users do not self-register currency balances.
+- Game currency is verified by an administrator in-game and then issued to the bank through the confirmed mint action in `/admin`; users do not self-register currency balances.
 
 ## Product
 
@@ -47,7 +47,7 @@ Discord 서버에서 가상 통화·계좌와 길드 가상주식 시장을 운�
 ## User preferences
 
 - Normal bot replies default to Korean. Slash command names remain English; command explanations in bot menus and forms follow each user's saved language. Discord's native slash-command picker descriptions follow each user's Discord client locale. `/help` lists command names only, one per line.
-- Keep 8–15 top-level slash command entry points. Use text-only menu guidance; reserve buttons for confirmations and settings. Keep the main command groups broad, and place every administrator-only command under `/admin`, grouped by function.
+- Expose eight top-level category commands plus `/help` and `/language`; each category command opens its own action picker. Do not add `/bank`, `/menu`, or slash-command autocomplete. Keep administrator actions under `/admin` with permission checks.
 - The investment system is a guild virtual-stock exchange based on the supplied ROBELLANK operating rules, not fixed-term investment products.
 
 ## Gotchas
