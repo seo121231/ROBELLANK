@@ -32,38 +32,31 @@ BANK_GOLD = 0xD7B43B
 MESSAGE_CHUNK_LIMIT = 1800
 CATEGORY_PAGE_SIZE = 12
 COMMAND_CATEGORIES = (
-    ("profile", "Accounts, balances, tier, history, and language"),
-    ("storage", "Bank storage and item requests"),
-    ("requests", "Bank item requests"),
-    ("savings", "Currency, transfers, exchanges, and deposits"),
-    ("loan", "Loan requests, repayments, and reviews"),
-    ("stocks", "Virtual stock trading and holdings"),
-    ("market", "Market announcements"),
+    ("bank", "Accounts, savings, loans, storage, and requests"),
+    ("market", "Virtual stocks and market announcements"),
     ("admin", "Administrative bank settings and account controls"),
 )
 CATEGORY_LABELS = {
-    "profile": {"en": "Accounts", "ko": "계정"},
-    "storage": {"en": "Storage", "ko": "보관함"},
-    "requests": {"en": "Requests", "ko": "의뢰"},
-    "savings": {"en": "Savings", "ko": "저축"},
-    "loan": {"en": "Loans", "ko": "대출"},
-    "stocks": {"en": "Stocks", "ko": "주식"},
+    "bank": {"en": "Bank", "ko": "은행"},
     "market": {"en": "Market", "ko": "시장"},
     "admin": {"en": "Admin", "ko": "관리자"},
 }
 COMMAND_DESCRIPTION_KO = {
-    "profile": "계정, 잔액, 등급, 거래 내역 및 언어 설정",
-    "storage": "은행 보관 아이템과 보관 설정",
-    "requests": "은행 아이템 의뢰 관리",
-    "savings": "재화, 송금, 환전 및 예금",
-    "loan": "대출 신청, 상환 및 심사",
-    "stocks": "가상주식 거래와 보유 현황",
-    "market": "시장 공지 조회",
+    "bank": "계좌, 저축, 대출, 보관함 및 아이템 의뢰",
+    "bank account": "계좌 개설, 잔액, 등급 및 거래 내역",
+    "bank savings": "재화, 송금, 환전 및 예금",
+    "bank loan": "대출 신청, 상환 및 연장",
+    "bank storage": "은행 보관 아이템 확인",
+    "bank requests": "은행 아이템 의뢰 신청 및 조회",
+    "market": "가상주식 거래와 시장 공지",
+    "market stock": "종목 조회, 거래, 주문 및 포트폴리오",
     "admin": "은행 설정과 계좌 관리",
     "menu": "주요 명령어를 안내합니다",
     "language": "봇 응답 언어를 한국어 또는 영어로 설정합니다",
     "help": "은행 봇 사용법과 전체 명령어를 확인합니다",
     "admin currency delete": "관리자: 재화를 사용 중지하고 기존 기록을 보존합니다",
+    "admin credit": "신용점수와 조정 관리",
+    "admin currency": "재화와 이자율 관리",
     "admin market": "주식 상장, 평가 및 시장 관리",
     "admin loan": "대출 신청 심사와 담보 처리",
     "admin storage": "은행 보관 아이템 관리",
@@ -628,7 +621,7 @@ async def account(
         user_id,
     )
     if not row:
-        raise ValueError("계좌가 없습니다. 먼저 `/profile register`를 실행하세요.")
+        raise ValueError("계좌가 없습니다. 먼저 `/bank account register`를 실행하세요.")
     if row["frozen"] and not allow_frozen:
         raise ValueError("계좌가 동결되어 거래할 수 없습니다. 관리자에게 문의하세요.")
     return row
@@ -1526,7 +1519,7 @@ async def stock_list(interaction: discord.Interaction) -> None:
                 inline=False,
             )
         embed.set_footer(
-            text=f"총 {len(rows)}종목 · 상세 조회: /stocks stock quote"
+            text=f"총 {len(rows)}종목 · 상세 조회: /market stock quote"
             if len(rows) <= 24
             else f"총 {len(rows)}종목 · 목록에는 이름순 24종목 표시"
         )
@@ -2152,9 +2145,8 @@ def build_main_menu_embed(language: str) -> discord.Embed:
             title="ROBELLANK Bank",
             description=(
                 "Use the slash command group that matches what you need.\n"
-                "Bank: `/profile` · `/savings` · `/loan`\n"
-                "Items: `/storage` · `/requests`\n"
-                "Stocks: `/stocks` · `/market`\n"
+                "Bank: `/bank`\n"
+                "Market: `/market`\n"
                 "Admin: `/admin` · Help: `/help` · Language: `/language`"
             ),
             color=BANK_GOLD,
@@ -2163,9 +2155,8 @@ def build_main_menu_embed(language: str) -> discord.Embed:
         title="ROBELLANK 은행",
         description=(
             "필요한 기능에 맞는 슬래시 명령어 범주를 사용하세요.\n"
-            "은행: `/profile` · `/savings` · `/loan`\n"
-            "아이템: `/storage` · `/requests`\n"
-            "주식: `/stocks` · `/market`\n"
+            "은행: `/bank`\n"
+            "시장·주식: `/market`\n"
             "관리자: `/admin` · 도움말: `/help` · 언어: `/language`"
         ),
         color=BANK_GOLD,
@@ -2211,7 +2202,7 @@ def build_stock_list_embed(
     if english:
         embed.set_footer(text=f"{len(rows)} listed stocks")
     else:
-        embed.set_footer(text=f"총 {len(rows)}종목 · 상세 조회: /stocks stock quote")
+        embed.set_footer(text=f"총 {len(rows)}종목 · 상세 조회: /market stock quote")
     return embed
 
 
@@ -2429,7 +2420,7 @@ class BankMenuView(discord.ui.View):
                         embed=build_member_select_embed(language),
                         view=MemberSelectView(
                             self.owner_id,
-                            command=get_command_by_path("savings transfer"),
+                            command=get_command_by_path("bank savings transfer"),
                             action="transfer",
                             language=language,
                         ),
@@ -2469,9 +2460,9 @@ class BankMenuView(discord.ui.View):
 
 
 MENU_COMMAND_PATHS = {
-    "account": "profile balance",
-    "stock-list": "stocks stock list",
-    "portfolio": "stocks portfolio",
+    "account": "bank account balance",
+    "stock-list": "market stock list",
+    "portfolio": "market stock portfolio",
 }
 MENU_COMMAND_ARGUMENTS: dict[str, dict[str, object]] = {"account": {"user": None}}
 
@@ -2546,11 +2537,11 @@ async def start_action_command(
 
     language = await get_user_language(owner_id)
     simple_forms = {
-        "savings transfer": "transfer",
-        "savings deposit": "deposit",
-        "savings exchange": "exchange",
-        "stocks stock buy": "buy-stock",
-        "stocks stock sell": "sell-stock",
+        "bank savings transfer": "transfer",
+        "bank savings deposit": "deposit",
+        "bank savings exchange": "exchange",
+        "market stock buy": "buy-stock",
+        "market stock sell": "sell-stock",
     }
     action = simple_forms.get(command.qualified_name)
     if action == "transfer":
@@ -2775,16 +2766,16 @@ class BankActionModal(discord.ui.Modal):
                     name=self.action.title(),
                     value=self.action,
                 )
-                path = "savings deposit"
+                path = "bank savings deposit"
             elif self.action == "transfer":
-                path = "savings transfer"
+                path = "bank savings transfer"
             elif self.action == "exchange":
-                path = "savings exchange"
+                path = "bank savings exchange"
             else:
                 path = (
-                    "stocks stock buy"
+                    "market stock buy"
                     if self.action == "buy-stock"
-                    else "stocks stock sell"
+                    else "market stock sell"
                 )
             await invoke_menu_command(interaction, path, **values)
         except ValueError as error:
@@ -6828,45 +6819,46 @@ async def before_scheduled_tasks() -> None:
     await bot.wait_until_ready()
 
 
-def rename_group_commands(
-    group: app_commands.Group, aliases: dict[str, str]
-) -> None:
-    for old_name, new_name in aliases.items():
-        command = group.get_command(old_name)
-        if command is None:
-            raise RuntimeError(
-                f"Cannot find {old_name!r} while organizing {group.name!r}."
-            )
-        group.remove_command(old_name)
-        command.name = new_name
-        group.add_command(command)
-
-
 def organize_command_categories(tree: app_commands.CommandTree) -> None:
     categories = {
-        "profile": app_commands.Group(
-            name="profile", description="Account, balances, tier, history, and settings"
+        "bank": app_commands.Group(
+            name="bank",
+            description="Accounts, savings, loans, storage, and requests",
         ),
-        "storage": app_commands.Group(
-            name="storage", description="Bank storage"
+        "market": app_commands.Group(
+            name="market", description="Virtual stocks and market announcements"
         ),
-        "requests": app_commands.Group(
-            name="requests", description="Bank item requests"
-        ),
-        "savings": app_commands.Group(
-            name="savings", description="Currency, transfers, exchanges, and deposits"
-        ),
-        "loan": app_commands.Group(
-            name="loan", description="Loan requests, repayments, and reviews"
-        ),
-        "stocks": app_commands.Group(
-            name="stocks", description="Virtual stock trading and holdings"
-        ),
-        "market": app_commands.Group(name="market", description="Market announcements"),
         "admin": app_commands.Group(
             name="admin", description="Administrative bank settings and account controls"
         ),
     }
+    bank_subgroups = {
+        "account": app_commands.Group(
+            name="account",
+            description="Account registration, balances, tiers, and history",
+        ),
+        "savings": app_commands.Group(
+            name="savings",
+            description="Currencies, transfers, exchanges, and deposits",
+        ),
+        "loan": app_commands.Group(
+            name="loan", description="Loan requests, repayments, and extensions"
+        ),
+        "storage": app_commands.Group(
+            name="storage", description="Items stored at the bank"
+        ),
+        "requests": app_commands.Group(
+            name="requests", description="Bank item requests"
+        ),
+    }
+    for subgroup in bank_subgroups.values():
+        categories["bank"].add_command(subgroup)
+
+    stock_subgroup = app_commands.Group(
+        name="stock", description="Stock lookup, trading, orders, and portfolio"
+    )
+    categories["market"].add_command(stock_subgroup)
+
     admin_subgroups = {
         "market": app_commands.Group(
             name="market",
@@ -6884,186 +6876,112 @@ def organize_command_categories(tree: app_commands.CommandTree) -> None:
             name="requests",
             description="Manage bank item requests",
         ),
+        "credit": app_commands.Group(
+            name="credit", description="Manage credit scores and adjustments"
+        ),
+        "currency": app_commands.Group(
+            name="currency", description="Manage currencies and interest rates"
+        ),
     }
     for subgroup in admin_subgroups.values():
         categories["admin"].add_command(subgroup)
 
-    def move_admin_commands(
-        source: app_commands.Group, destination: app_commands.Group
+    def move_tree_command(
+        name: str,
+        destination: app_commands.Group,
+        *,
+        new_name: str | None = None,
+    ) -> app_commands.Command:
+        command = tree.remove_command(name)
+        if command is None:
+            raise RuntimeError(f"Cannot find command {name!r}.")
+        if new_name is not None:
+            command.name = new_name
+        destination.add_command(command)
+        return command
+
+    def move_group_children(
+        source_name: str,
+        destinations: dict[str, app_commands.Group],
+        *,
+        public_rename: dict[str, str] | None = None,
     ) -> None:
+        source = tree.remove_command(source_name)
+        if not isinstance(source, app_commands.Group):
+            raise RuntimeError(f"Cannot find command group {source_name!r}.")
         for child in list(source.commands):
-            if isinstance(child, app_commands.Group) or not child.checks:
-                continue
             command = source.get_command(child.name)
             if command is None:
                 raise RuntimeError(
-                    f"Cannot find {child.name!r} while moving admin actions."
+                    f"Cannot find {child.name!r} while organizing {source_name!r}."
                 )
             source.remove_command(child.name)
+            destination = destinations["admin"] if command.checks else destinations["public"]
+            if not command.checks and public_rename and command.name in public_rename:
+                command.name = public_rename[command.name]
             destination.add_command(command)
 
-    direct_commands = {
-        "profile": {
-            "register": "register",
-            "balance": "balance",
-            "tier": "tier",
-            "history": "history",
-            "leaderboard": "leaderboard",
-        },
-        "savings": {
-            "transfer": "transfer",
-            "exchange": "exchange",
-            "deposit": "deposit",
-        },
-        "stocks": {"portfolio": "portfolio"},
-        "admin": {
-            "mint": "mint",
-            "confiscate": "confiscate",
-            "freeze": "freeze",
-            "unfreeze": "unfreeze",
-            "supply": "supply",
-            "tier-benefits": "tier-benefits",
-        },
-    }
-    for category_name, moves in direct_commands.items():
-        category = categories[category_name]
-        for old_name, new_name in moves.items():
-            command = tree.remove_command(old_name)
-            if command is None:
-                raise RuntimeError(f"Cannot find command {old_name!r}.")
-            command.name = new_name
-            category.add_command(command)
+    for command_name in ("register", "balance", "tier", "history", "leaderboard"):
+        move_tree_command(command_name, bank_subgroups["account"])
+    for command_name in ("transfer", "exchange", "deposit"):
+        move_tree_command(command_name, bank_subgroups["savings"])
+    for command_name in (
+        "mint",
+        "confiscate",
+        "freeze",
+        "unfreeze",
+        "supply",
+        "tier-benefits",
+    ):
+        move_tree_command(command_name, categories["admin"])
 
-    group_moves = (
-        (
-            "loan",
-            "loan",
-            "loan",
-            {
-                "request": "request",
-                "collateral-request": "collateral-request",
-                "list": "list",
-                "repay": "repay",
-                "extend": "extend",
-                "queue": "queue",
-                "approve": "approve",
-                "collateral-approve": "collateral-approve",
-                "reject": "reject",
-                "collateral-return": "collateral-return",
-            },
-        ),
-        (
-            "vault",
-            "storage",
-            "vault",
-            {"list": "list", "add": "add", "remove": "remove"},
-        ),
-        (
-            "bank-request",
-            "requests",
-            "requests",
-            {
-                "submit": "submit",
-                "list": "list",
-                "queue": "queue",
-                "update": "update",
-            },
-        ),
-        (
-            "stock",
-            "stocks",
-            "stock",
-            {
-                "list": "list",
-                "table": "table",
-                "quote": "quote",
-                "buy": "buy",
-                "sell": "sell",
-                "orders": "orders",
-                "cancel": "cancel",
-            },
-        ),
-        (
-            "market",
-            "market",
-            "market",
-            {
-                "news": "news",
-                "rumor": "rumor",
-                "create": "create",
-                "describe": "describe",
-                "issue": "issue",
-                "burn": "burn",
-                "remove": "remove",
-                "relist": "relist",
-                "evaluate": "evaluate",
-                "publish": "publish",
-                "channel": "channel",
-                "note": "note",
-                "officer-add": "officer-add",
-                "officer-remove": "officer-remove",
-            },
-        ),
-        (
-            "credit",
-            "admin",
-            "credit",
-            {"set": "set", "adjust": "adjust"},
-        ),
-        (
-            "currency",
-            "admin",
-            "currency",
-            {
-                "create": "create",
-                "setbase": "setbase",
-                "setvalue": "setvalue",
-                "setrate": "setrate",
-                "remove": "remove",
-                "delete": "delete",
-            },
-        ),
+    move_group_children(
+        "loan",
+        {
+            "public": bank_subgroups["loan"],
+            "admin": admin_subgroups["loan"],
+        },
     )
-    for old_name, category_name, new_name, aliases in group_moves:
-        group = tree.remove_command(old_name)
-        if not isinstance(group, app_commands.Group):
-            raise RuntimeError(f"Cannot find command group {old_name!r}.")
-        if old_name in {"loan", "bank-request", "market"}:
-            for child in list(group.commands):
-                command = group.get_command(child.name)
-                if command is None:
-                    raise RuntimeError(
-                        f"Cannot find {child.name!r} while flattening {old_name!r}."
-                    )
-                group.remove_command(child.name)
-                command.name = aliases[child.name]
-                if command.checks:
-                    subgroup_name = {
-                        "loan": "loan",
-                        "bank-request": "requests",
-                        "market": "market",
-                    }[old_name]
-                    admin_subgroups[subgroup_name].add_command(command)
-                else:
-                    categories[category_name].add_command(command)
-            continue
-        if old_name == "currency":
-            public_list = group.get_command("list")
-            if public_list is None:
-                raise RuntimeError("Cannot find the currency list command.")
-            group.remove_command("list")
-            public_list.name = "currencies"
-            categories["savings"].add_command(public_list)
-        rename_group_commands(group, aliases)
-        group.name = new_name
-        if old_name == "vault":
-            move_admin_commands(group, admin_subgroups["storage"])
-        categories[category_name].add_command(group)
+    move_group_children(
+        "vault",
+        {
+            "public": bank_subgroups["storage"],
+            "admin": admin_subgroups["storage"],
+        },
+    )
+    move_group_children(
+        "bank-request",
+        {
+            "public": bank_subgroups["requests"],
+            "admin": admin_subgroups["requests"],
+        },
+    )
+    move_group_children(
+        "stock",
+        {"public": stock_subgroup, "admin": stock_subgroup},
+    )
+    move_tree_command("portfolio", stock_subgroup)
+
+    move_group_children(
+        "market",
+        {"public": categories["market"], "admin": admin_subgroups["market"]},
+    )
+    move_group_children(
+        "credit",
+        {"public": admin_subgroups["credit"], "admin": admin_subgroups["credit"]},
+    )
+    move_group_children(
+        "currency",
+        {
+            "public": bank_subgroups["savings"],
+            "admin": admin_subgroups["currency"],
+        },
+        public_rename={"list": "currencies"},
+    )
 
     # The older tier-config group has been replaced with one interactive setting panel.
     tree.remove_command("tier-config")
-    for name in ("profile", "storage", "requests", "savings", "loan", "stocks", "market", "admin"):
-        category = categories[name]
+    for category in categories.values():
         tree.add_command(category)
 
 
@@ -7090,20 +7008,20 @@ def register_menu_command_tree(tree: app_commands.CommandTree) -> None:
 
 def register_command_autocomplete() -> None:
     bindings = {
-        "profile leaderboard": {"currency": currency_autocomplete},
-        "savings transfer": {"currency": currency_autocomplete},
-        "savings exchange": {
+        "bank account leaderboard": {"currency": currency_autocomplete},
+        "bank savings transfer": {"currency": currency_autocomplete},
+        "bank savings exchange": {
             "from_currency": currency_autocomplete,
             "to": currency_autocomplete,
         },
-        "savings deposit": {"currency": currency_autocomplete},
-        "loan request": {"currency": credit_loan_currency_autocomplete},
-        "loan repay": {"loan_id": personal_loan_autocomplete},
-        "loan extend": {"loan_id": extendable_loan_autocomplete},
-        "stocks stock quote": {"stock": listed_stock_autocomplete},
-        "stocks stock buy": {"stock": listed_stock_autocomplete},
-        "stocks stock sell": {"stock": listed_stock_autocomplete},
-        "stocks stock cancel": {"order_id": order_id_autocomplete},
+        "bank savings deposit": {"currency": currency_autocomplete},
+        "bank loan request": {"currency": credit_loan_currency_autocomplete},
+        "bank loan repay": {"loan_id": personal_loan_autocomplete},
+        "bank loan extend": {"loan_id": extendable_loan_autocomplete},
+        "market stock quote": {"stock": listed_stock_autocomplete},
+        "market stock buy": {"stock": listed_stock_autocomplete},
+        "market stock sell": {"stock": listed_stock_autocomplete},
+        "market stock cancel": {"order_id": order_id_autocomplete},
         "admin mint": {"currency": currency_autocomplete},
         "admin confiscate": {"currency": currency_autocomplete},
         "admin supply": {"currency": currency_autocomplete},

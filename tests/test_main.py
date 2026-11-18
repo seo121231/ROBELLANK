@@ -259,7 +259,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(main.is_unscored_market_evaluation(row))
         self.assertIn("점수 미등록 · 무작위 변동", main.market_report_line(row))
 
-    def test_eleven_english_slash_commands_are_registered(self):
+    def test_six_english_slash_commands_are_registered(self):
         commands = {
             command.name: command.to_dict(main.bot.tree)
             for command in main.bot.tree.get_commands()
@@ -270,29 +270,20 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
                 "menu",
                 "language",
                 "help",
-                "profile",
-                "storage",
-                "requests",
-                "savings",
-                "loan",
-                "stocks",
+                "bank",
                 "market",
                 "admin",
             },
         )
-        self.assertEqual(len(commands), 11)
-        stock_commands = {
-            command.name
-            for command in main.ACTION_COMMANDS_BY_CATEGORY["stocks"]
+        self.assertEqual(len(commands), 6)
+        market_commands = {
+            command.qualified_name
+            for command in main.ACTION_COMMANDS_BY_CATEGORY["market"]
         }
-        self.assertIn("table", stock_commands)
+        self.assertIn("market stock table", market_commands)
         self.assertIn(
-            "news",
-            {command.name for command in main.ACTION_COMMANDS_BY_CATEGORY["market"]},
-        )
-        self.assertIn(
-            "currencies",
-            {command.name for command in main.ACTION_COMMANDS_BY_CATEGORY["savings"]},
+            "market news",
+            market_commands,
         )
         groups = []
         for root in main.bot.tree.get_commands():
@@ -310,11 +301,12 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
                 for name, _ in main.COMMAND_CATEGORIES
             )
         )
-        self.assertIsNotNone(main.get_command_by_path("stocks stock buy"))
+        self.assertIsNotNone(main.get_command_by_path("market stock buy"))
+        self.assertIsNotNone(main.get_command_by_path("bank savings transfer"))
         self.assertIsNotNone(main.get_command_by_path("admin market create"))
         self.assertIsNotNone(main.get_command_by_path("market news"))
         with self.assertRaisesRegex(ValueError, "Command path is not registered"):
-            main.get_command_by_path("market create")
+            main.get_command_by_path("admin create")
 
     def test_stock_creation_command_is_available_under_admin_market(self):
         command = main.ACTION_COMMANDS_BY_PATH.get("admin market create")
@@ -328,26 +320,26 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
 
     def test_documented_core_features_have_registered_commands(self):
         required_paths = {
-            "profile register",
-            "profile balance",
-            "profile history",
-            "savings currencies",
-            "savings transfer",
-            "savings exchange",
-            "savings deposit",
-            "loan request",
-            "loan repay",
+            "bank account register",
+            "bank account balance",
+            "bank account history",
+            "bank savings currencies",
+            "bank savings transfer",
+            "bank savings exchange",
+            "bank savings deposit",
+            "bank loan request",
+            "bank loan repay",
             "admin loan approve",
-            "storage vault list",
+            "bank storage list",
             "admin storage add",
-            "requests submit",
+            "bank requests submit",
             "admin requests update",
-            "stocks stock list",
-            "stocks stock quote",
-            "stocks stock buy",
-            "stocks stock sell",
-            "stocks stock cancel",
-            "stocks portfolio",
+            "market stock list",
+            "market stock quote",
+            "market stock buy",
+            "market stock sell",
+            "market stock cancel",
+            "market stock portfolio",
             "admin market create",
             "admin market evaluate",
             "admin market publish",
@@ -377,19 +369,19 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
     def test_menu_shows_broad_command_categories_as_text(self):
         embed = main.build_main_menu_embed("ko")
 
-        self.assertIn("은행: `/profile` · `/savings` · `/loan`", embed.description)
-        self.assertIn("아이템: `/storage` · `/requests`", embed.description)
+        self.assertIn("은행: `/bank`", embed.description)
+        self.assertIn("시장·주식: `/market`", embed.description)
         self.assertIn("관리자: `/admin`", embed.description)
 
     def test_direct_slash_commands_resolve_without_menu_shortcuts(self):
         paths = list(main.MENU_COMMAND_PATHS.values())
         paths.extend(
             [
-                "savings transfer",
-                "savings deposit",
-                "savings exchange",
-                "stocks stock buy",
-                "stocks stock sell",
+                "bank savings transfer",
+                "bank savings deposit",
+                "bank savings exchange",
+                "market stock buy",
+                "market stock sell",
             ]
         )
         for path in paths:
@@ -480,7 +472,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         )
         view = main.MemberSelectView(
             123456,
-            command=main.ACTION_COMMANDS_BY_PATH["savings transfer"],
+            command=main.ACTION_COMMANDS_BY_PATH["bank savings transfer"],
             action="transfer",
             language="ko",
         )
@@ -573,12 +565,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             [
                 "/menu",
                 "/language",
-                "/profile",
-                "/storage",
-                "/requests",
-                "/savings",
-                "/loan",
-                "/stocks",
+                "/bank",
                 "/market",
                 "/admin",
                 "/help",
@@ -605,7 +592,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self,
     ):
         translator = main.BankCommandTranslator()
-        group = main.bot.tree.get_command("profile")
+        group = main.bot.tree.get_command("bank")
         group_context = main.app_commands.TranslationContext(
             main.app_commands.TranslationContextLocation.group_description,
             group,
@@ -629,7 +616,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        command = main.ACTION_COMMANDS_BY_PATH["savings transfer"]
+        command = main.ACTION_COMMANDS_BY_PATH["bank savings transfer"]
         parameter = command.parameters[0]
         parameter_context = main.app_commands.TranslationContext(
             main.app_commands.TranslationContextLocation.parameter_description,
@@ -799,10 +786,10 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_language_setting_translates_known_messages_and_keeps_korean(self):
-        original = "계좌가 없습니다. 먼저 `/profile register`를 실행하세요."
+        original = "계좌가 없습니다. 먼저 `/bank account register`를 실행하세요."
         self.assertEqual(
             translate_message(original, "en"),
-            "You do not have an account. Run `/profile register` first.",
+            "You do not have an account. Run `/bank account register` first.",
         )
         self.assertEqual(translate_message(original, "ko"), original)
 
@@ -902,7 +889,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             user=SimpleNamespace(id=123456),
             response=response,
         )
-        source = "계좌가 없습니다. 먼저 `/profile register`를 실행하세요."
+        source = "계좌가 없습니다. 먼저 `/bank account register`를 실행하세요."
 
         with patch.object(main, "pool", pool, create=True):
             await main.set_user_language(123456, "en")
@@ -912,7 +899,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("content", message)
         self.assertEqual(
             message["embed"].description,
-            "You do not have an account. Run `/profile register` first.",
+            "You do not have an account. Run `/bank account register` first.",
         )
         self.assertEqual(message["embed"].color.value, main.BANK_GOLD)
 
@@ -1134,9 +1121,9 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
 
     def test_autocomplete_is_attached_to_all_approved_lookup_inputs(self):
         expected = {
-            "savings exchange": {"from_currency", "to"},
+            "bank savings exchange": {"from_currency", "to"},
             "admin currency create": {"name"},
-            "stocks stock cancel": {"order_id"},
+            "market stock cancel": {"order_id"},
             "admin loan approve": {"loan_id"},
             "admin loan collateral-approve": {"loan_id"},
             "admin loan reject": {"loan_id"},
@@ -1195,7 +1182,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             all(command.qualified_name.startswith("admin ") for command in admin_only)
         )
         self.assertFalse(main.ACTION_COMMANDS_BY_PATH["market news"].checks)
-        self.assertFalse(main.ACTION_COMMANDS_BY_PATH["loan request"].checks)
+        self.assertFalse(main.ACTION_COMMANDS_BY_PATH["bank loan request"].checks)
 
     def test_currency_removal_and_relisting_confirmations_are_translated(self):
         currency_message = (
