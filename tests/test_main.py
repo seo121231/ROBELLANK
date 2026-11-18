@@ -356,6 +356,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             "loan repay",
             "admin loan approve",
             "storage vault list",
+            "storage vault history",
             "admin storage add",
             "requests submit",
             "admin requests update",
@@ -606,23 +607,74 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             await command.checks[0](SimpleNamespace(user=regular_user))
         )
 
-    def test_help_lists_only_english_slash_commands(self):
-        lines = main.build_help_embed("ko").description.splitlines()
-        self.assertEqual(
-            lines,
-            [
-                "/language",
-                "/profile",
-                "/storage",
-                "/requests",
-                "/savings",
-                "/loan",
-                "/stocks",
-                "/market",
-                "/admin",
-                "/help",
-            ],
+    def test_help_lists_commands_with_descriptions_across_pages(self):
+        entries = main.build_help_entries("ko")
+        page_count = (
+            len(entries) + main.HELP_PAGE_SIZE - 1
+        ) // main.HELP_PAGE_SIZE
+        displayed_entries = [
+            line
+            for page in range(page_count)
+            for line in main.build_help_embed("ko", page).description.splitlines()
+        ]
+
+        self.assertEqual(displayed_entries, entries)
+        self.assertIn(
+            "`/profile` → `balance` — 지갑·예금 잔액을 확인합니다",
+            entries,
         )
+        self.assertTrue(
+            any(
+                entry.startswith("`/storage` → `vault history` — ")
+                and "보관 기록" in entry
+                for entry in entries
+            )
+        )
+        self.assertTrue(any(entry.startswith("`/help` — ") for entry in entries))
+        self.assertTrue(
+            all(
+                len(main.build_help_embed("ko", page).description) <= 4096
+                for page in range(page_count)
+            )
+        )
+        self.assertEqual(len(main.HelpView(123456, "ko").children), 2)
+
+    async def test_vault_history_shows_recent_records_for_current_user(self):
+        pool = FakePool()
+        created_at = main.datetime(2026, 11, 18, 11, 30, tzinfo=main.UTC)
+        pool.connection.fetch_rows = [
+            {
+                "item_name": "철광석",
+                "quantity": 4,
+                "operation": "add",
+                "reason": "게임 내 확인 완료",
+                "actor_discord_user_id": "654321",
+                "created_at": created_at,
+            }
+        ]
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=123456),
+            guild_id=987654321,
+        )
+        command = main.get_command_by_path("storage vault history")
+
+        with (
+            patch.object(main, "pool", pool, create=True),
+            patch.object(
+                main, "get_user_language", AsyncMock(return_value="ko")
+            ),
+            patch.object(main, "send_public", new=AsyncMock()) as send_public,
+        ):
+            await command.callback(interaction)
+
+        self.assertEqual(pool.connection.fetch_args, ("987654321", "123456"))
+        self.assertIn("target_discord_user_id", pool.connection.fetch_query)
+        self.assertIn("LIMIT 10", pool.connection.fetch_query)
+        content = send_public.await_args.args[1]
+        self.assertIn("철광석 4개", content)
+        self.assertIn("입고", content)
+        self.assertIn("게임 내 확인 완료", content)
+        self.assertIn("<@654321>", content)
 
     def test_registered_command_descriptions_and_choices_are_english(self):
         commands = [

@@ -46,7 +46,7 @@ Discord 서버에서 가상 통화·계좌와 길드 가상주식 시장을 운�
 
 ## User preferences
 
-- Normal bot replies default to Korean. Slash command names remain English; command explanations in bot menus and forms follow each user's saved language. Discord's native slash-command picker descriptions follow each user's Discord client locale. Category action menus omit the category prefix from displayed action names while retaining the full command path internally. `/help` lists command names only, one per line.
+- Normal bot replies default to Korean. Slash command names remain English; command explanations in bot menus, forms, and `/help` follow each user's saved language. Discord's native slash-command picker descriptions follow each user's Discord client locale. Category action menus omit the category prefix from displayed action names while retaining the full command path internally. `/help` lists every top-level command and menu action with its description, split across pages when needed.
 - Expose eight top-level category commands plus `/help` and `/language`; each category command opens its own action picker. Do not add `/bank`, `/menu`, or slash-command autocomplete. Keep administrator actions under `/admin` with permission checks.
 - The investment system is a guild virtual-stock exchange based on the supplied ROBELLANK operating rules, not fixed-term investment products.
 

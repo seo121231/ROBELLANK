@@ -31,6 +31,7 @@ ADMIN_DESCRIPTION_PREFIX = "Admin only · "
 BANK_GOLD = 0xD7B43B
 MESSAGE_CHUNK_LIMIT = 1800
 CATEGORY_PAGE_SIZE = 12
+HELP_PAGE_SIZE = 12
 COMMAND_CATEGORIES = (
     ("profile", "Accounts, balances, tier, history, and settings"),
     ("storage", "Bank storage and item requests"),
@@ -62,6 +63,7 @@ COMMAND_DESCRIPTION_KO = {
     "admin": "은행 설정과 계좌 관리",
     "language": "봇 응답 언어를 한국어 또는 영어로 설정합니다",
     "help": "은행 봇 사용법과 전체 명령어를 확인합니다",
+    "storage vault history": "내 최근 은행 보관 기록을 확인합니다",
     "admin currency delete": "관리자: 재화를 사용 중지하고 기존 기록을 보존합니다",
     "admin credit": "신용점수와 조정 관리",
     "admin currency": "재화와 이자율 관리",
@@ -2077,24 +2079,116 @@ async def help_command(interaction: discord.Interaction) -> None:
     await send_public(
         interaction,
         embed=build_help_embed(language),
+        view=HelpView(interaction.user.id, language),
         language=language,
     )
 
 
-def build_help_embed(language: str) -> discord.Embed:
-    command_order = (
-        "language",
-        *(name for name, _ in COMMAND_CATEGORIES),
-    )
-    lines = [
-        f"/{name}" for name in command_order if bot.tree.get_command(name)
-    ]
-    if bot.tree.get_command("help"):
-        lines.append("/help")
-    return discord.Embed(
-        description="\n".join(lines),
+def build_help_entries(language: str) -> list[str]:
+    entries = []
+    language_command = bot.tree.get_command("language")
+    if language_command:
+        entries.append(
+            f"`/language` — {localized_command_description(language_command, language)}"
+        )
+
+    for category, _ in COMMAND_CATEGORIES:
+        category_command = bot.tree.get_command(category)
+        if category_command:
+            entries.append(
+                f"`/{category}` — "
+                f"{localized_command_description(category_command, language)}"
+            )
+        for command in ACTION_COMMANDS_BY_CATEGORY.get(category, []):
+            action = command.qualified_name.removeprefix(
+                category + " "
+            ).replace("-", " ")
+            entries.append(
+                f"`/{category}` → `{action}` — "
+                f"{localized_command_description(command, language)}"
+            )
+
+    help_command_object = bot.tree.get_command("help")
+    if help_command_object:
+        entries.append(
+            f"`/help` — "
+            f"{localized_command_description(help_command_object, language)}"
+        )
+    return entries
+
+
+def build_help_embed(language: str, page: int = 0) -> discord.Embed:
+    entries = build_help_entries(language)
+    page_count = max(1, (len(entries) + HELP_PAGE_SIZE - 1) // HELP_PAGE_SIZE)
+    page = min(max(page, 0), page_count - 1)
+    start = page * HELP_PAGE_SIZE
+    embed = discord.Embed(
+        title="Command guide" if language == "en" else "명령어 안내",
+        description="\n".join(entries[start : start + HELP_PAGE_SIZE]),
         color=BANK_GOLD,
     )
+    embed.set_footer(
+        text=f"Page {page + 1} of {page_count}"
+        if language == "en"
+        else f"{page + 1}/{page_count} 페이지"
+    )
+    return embed
+
+
+class HelpView(discord.ui.View):
+    def __init__(self, owner_id: int, language: str, page: int = 0):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.language = language
+        page_count = max(
+            1,
+            (
+                len(build_help_entries(language)) + HELP_PAGE_SIZE - 1
+            ) // HELP_PAGE_SIZE,
+        )
+        self.page = min(max(page, 0), page_count - 1)
+        if page_count <= 1:
+            return
+
+        previous_button = discord.ui.Button(
+            label="Previous" if language == "en" else "이전",
+            style=discord.ButtonStyle.secondary,
+            disabled=self.page == 0,
+        )
+
+        async def previous_page(interaction: discord.Interaction) -> None:
+            previous = max(0, self.page - 1)
+            await interaction.response.edit_message(
+                embed=build_help_embed(language, previous),
+                view=HelpView(self.owner_id, language, previous),
+            )
+
+        previous_button.callback = previous_page
+        self.add_item(previous_button)
+
+        next_button = discord.ui.Button(
+            label="Next" if language == "en" else "다음",
+            style=discord.ButtonStyle.secondary,
+            disabled=self.page >= page_count - 1,
+        )
+
+        async def next_page(interaction: discord.Interaction) -> None:
+            following = min(page_count - 1, self.page + 1)
+            await interaction.response.edit_message(
+                embed=build_help_embed(language, following),
+                view=HelpView(self.owner_id, language, following),
+            )
+
+        next_button.callback = next_page
+        self.add_item(next_button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await send_private(
+                interaction, "이 도움말을 연 사용자만 페이지를 넘길 수 있습니다."
+            )
+            return False
+        return True
 
 
 def build_category_embed(category_name: str, language: str) -> discord.Embed:
@@ -4819,6 +4913,57 @@ async def vault_list(interaction: discord.Interaction) -> None:
             interaction,
             f"**{TIER_NAME.get(acct['tier_key'], '브론즈')} 은행 보관함** · {fmt(total)}/{fmt(capacity)}개\n{text}",
         )
+
+    await safe_command(interaction, run)
+
+
+@vault_group.command(
+    name="history", description="View my recent bank storage history"
+)
+async def vault_history(interaction: discord.Interaction) -> None:
+    async def run():
+        guild_id = require_guild(interaction)
+        language = await get_user_language(interaction.user.id)
+        english = language == "en"
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT item_name,quantity,operation,reason,
+                          actor_discord_user_id,created_at
+                     FROM bank_vault_history
+                    WHERE guild_id=$1 AND target_discord_user_id=$2
+                    ORDER BY created_at DESC,id DESC LIMIT 10""",
+                guild_id,
+                str(interaction.user.id),
+            )
+        if not rows:
+            message = (
+                "No bank storage history."
+                if english
+                else "보관 기록이 없습니다."
+            )
+        else:
+            lines = []
+            for row in rows:
+                when = int(row["created_at"].timestamp())
+                operation = (
+                    "Stored" if row["operation"] == "add" else "Returned"
+                ) if english else (
+                    "입고" if row["operation"] == "add" else "반환"
+                )
+                if english:
+                    lines.append(
+                        f"<t:{when}:R> · {operation} · {row['item_name']} "
+                        f"{fmt(row['quantity'])} · by <@{row['actor_discord_user_id']}>\n"
+                        f"Reason: {row['reason']}"
+                    )
+                else:
+                    lines.append(
+                        f"<t:{when}:R> · {operation} · {row['item_name']} "
+                        f"{fmt(row['quantity'])}개 · 처리자 <@{row['actor_discord_user_id']}>\n"
+                        f"사유: {row['reason']}"
+                    )
+            message = "\n".join(lines)
+        await send_public(interaction, message, language=language)
 
     await safe_command(interaction, run)
 
