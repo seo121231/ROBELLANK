@@ -11,7 +11,7 @@ Discord 서버에서 가상 통화·계좌와 길드 가상주식 시장을 운�
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
 - Required env: `DATABASE_URL` — Postgres connection string
-- Optional env: `DISCORD_GUILD_ID` — sync a copy of slash commands to this server for faster updates; global sync remains enabled
+- Optional env: `DISCORD_GUILD_ID` — remove any legacy server-specific command copies from this server; slash commands are synced globally to avoid duplicates
 
 ## Stack
 

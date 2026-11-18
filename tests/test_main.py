@@ -87,6 +87,36 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(RuntimeError):
                     main.configured_discord_guild_id()
 
+    async def test_setup_clears_guild_command_copies_before_global_sync(self):
+        class RecordingTree:
+            def __init__(self):
+                self.cleared_guild_ids = []
+                self.synced_guild_ids = []
+
+            async def set_translator(self, translator):
+                self.translator = translator
+
+            def clear_commands(self, *, guild=None):
+                self.cleared_guild_ids.append(guild.id if guild else None)
+
+            async def sync(self, *, guild=None):
+                self.synced_guild_ids.append(guild.id if guild else None)
+                return []
+
+        bot = main.BankBot()
+        tree = RecordingTree()
+        bot.tree = tree
+
+        with (
+            patch.object(main, "DATABASE_URL", "postgres://test"),
+            patch.object(main, "configured_discord_guild_id", return_value=123456789),
+            patch.object(main.asyncpg, "create_pool", new=AsyncMock(return_value=object())),
+        ):
+            await bot.setup_hook()
+
+        self.assertEqual(tree.cleared_guild_ids, [123456789])
+        self.assertEqual(tree.synced_guild_ids, [123456789, None])
+
     def test_normalizes_stock_names_without_tickers(self):
         self.assertEqual(main.normalize_name("  Café   Market "), "café   market")
 
@@ -265,6 +295,16 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             all(not isinstance(command, main.app_commands.Group) for command in main.bot.tree.get_commands())
         )
+
+    def test_stock_creation_command_is_available_under_market(self):
+        command = main.ACTION_COMMANDS_BY_PATH.get("market create")
+
+        self.assertIsNotNone(command)
+        self.assertEqual(
+            [parameter.name for parameter in command.parameters],
+            ["name", "description", "price", "initial_shares", "holder", "reason"],
+        )
+        self.assertIn(command, main.ACTION_COMMANDS_BY_CATEGORY["market"])
 
     def test_language_and_menu_commands_are_registered(self):
         language = main.ACTION_COMMANDS_BY_PATH["profile language"]

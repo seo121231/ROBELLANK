@@ -788,11 +788,10 @@ class BankBot(discord.Client):
         guild_id = configured_discord_guild_id()
         if guild_id is not None:
             guild = discord.Object(id=guild_id)
-            self.tree.copy_global_to(guild=guild)
-            guild_synced = await self.tree.sync(guild=guild)
+            self.tree.clear_commands(guild=guild)
+            await self.tree.sync(guild=guild)
             logger.info(
-                "Synced %s application commands to configured server %s",
-                len(guild_synced),
+                "Cleared duplicate server-scoped commands from configured server %s",
                 guild_id,
             )
 
