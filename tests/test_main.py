@@ -125,6 +125,32 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tree.cleared_guild_ids, [123456789])
         self.assertEqual(tree.synced_guild_ids, [123456789, None])
 
+    async def test_command_tree_acknowledges_before_database_tier_sync(self):
+        events = []
+
+        async def defer():
+            events.append("defer")
+
+        async def sync_tier(*args):
+            events.append("sync")
+
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(is_done=lambda: False, defer=AsyncMock(side_effect=defer)),
+            guild_id=123456789,
+            user=SimpleNamespace(id=123456, bot=False, roles=[]),
+        )
+
+        with (
+            patch.object(main, "tier_for", return_value="gold"),
+            patch.object(main, "sync_tier", new=AsyncMock(side_effect=sync_tier)) as tier_sync,
+        ):
+            allowed = await main.bot.tree.interaction_check(interaction)
+
+        self.assertTrue(allowed)
+        self.assertEqual(events, ["defer", "sync"])
+        interaction.response.defer.assert_awaited_once()
+        tier_sync.assert_awaited_once_with("123456789", "123456", "gold")
+
     def test_normalizes_stock_names_without_tickers(self):
         self.assertEqual(main.normalize_name("  Café   Market "), "café   market")
 
@@ -274,9 +300,18 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             all(
                 not isinstance(command, main.app_commands.Group)
-                and command.parameters == []
                 for command in main.bot.tree.get_commands()
             )
+        )
+        self.assertTrue(
+            all(
+                not command.parameters
+                for command in main.bot.tree.get_commands()
+                if command.name != "language"
+            )
+        )
+        self.assertEqual(
+            len(main.bot.tree.get_command("language").parameters), 1
         )
         self.assertEqual(
             set(main.ACTION_COMMANDS_BY_CATEGORY),
@@ -365,8 +400,21 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         action_select = view.children[0]
 
         self.assertEqual(
-            {option.value.split()[0] for option in action_select.options},
-            {"profile"},
+            {option.label for option in action_select.options},
+            {
+                command.qualified_name.removeprefix("profile ").replace("-", " ")
+                for command in main.ACTION_COMMANDS_BY_CATEGORY["profile"]
+            },
+        )
+        self.assertIn("balance", {option.label for option in action_select.options})
+        self.assertNotIn(
+            "profile balance", {option.label for option in action_select.options}
+        )
+        self.assertTrue(
+            all(
+                option.value.startswith("profile ")
+                for option in action_select.options
+            )
         )
 
     def test_direct_slash_commands_resolve_without_menu_shortcuts(self):

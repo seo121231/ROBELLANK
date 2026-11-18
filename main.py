@@ -756,6 +756,8 @@ class BankCommandTranslator(app_commands.Translator):
 
 class BankCommandTree(app_commands.CommandTree):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not interaction.response.is_done():
+            await interaction.response.defer()
         if interaction.guild_id and not interaction.user.bot:
             await sync_tier(
                 str(interaction.guild_id),
@@ -2623,7 +2625,9 @@ class CategoryActionView(discord.ui.View):
             max_values=1,
             options=[
                 discord.SelectOption(
-                    label=command.qualified_name.replace("-", " ").title()[:100],
+                    label=command.qualified_name.removeprefix(
+                        category + " "
+                    ).replace("-", " ")[:100],
                     value=command.qualified_name,
                     description=localized_command_description(
                         command, language
