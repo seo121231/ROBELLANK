@@ -4,20 +4,20 @@ Discord 슬래시 명령으로 운영하는 서버별 가상 은행과 길드 �
 
 ## 명령 범주
 
-기능은 `/bank account balance`, `/bank savings deposit`, `/market stock buy`, `/admin market create`처럼 슬래시 명령으로 바로 실행합니다. `/menu`는 주요 범주를 안내하고 `/help`는 최상위 명령어 목록을 보여 줍니다. 신규 계좌는 지갑 잔액 0, 신용점수 50점으로 시작합니다.
+기능은 `/profile balance`, `/savings deposit`, `/stocks stock buy`, `/admin market create`처럼 슬래시 명령으로 바로 실행합니다. `/help`는 최상위 명령어 목록을 보여 줍니다. 신규 계좌는 지갑 잔액 0, 신용점수 50점으로 시작합니다.
 
 | 범주 | 주요 기능 |
 | --- | --- |
-| `/bank account` | 계좌 개설·잔액·등급·거래 내역 |
-| `/bank savings` | 재화 목록·송금·환전·예금·출금 |
-| `/bank loan` | 대출 신청·상환·연장 |
-| `/bank storage` | 은행 보관 아이템 확인 |
-| `/bank requests` | 은행 아이템 의뢰 신청·조회 |
-| `/market stock` | 종목 목록·상세·매수·매도·주문·포트폴리오 |
-| `/market` | 최근 시장 공지 |
+| `/profile` | 계좌 개설·잔액·등급·거래 내역 |
+| `/storage` | 은행 보관 아이템 확인·관리 |
+| `/requests` | 은행 아이템 의뢰 신청·관리 |
+| `/savings` | 재화 목록·송금·환전·예금·출금 |
+| `/loan` | 대출 신청·상환·연장·심사 |
+| `/stocks` | 종목 목록·상세·매수·매도·주문·포트폴리오 |
+| `/market` | 시장 공지·종목 관리 |
 | `/admin` | 재화·계좌·신용점수·등급 설정 |
 
-같은 기능의 명령은 `/bank`와 `/market` 아래에 묶었습니다. `/bank savings deposit`에서 예금 또는 출금 방향을 선택합니다. 주식 주문은 종목 이름을 사용하며, 매수 주문 금액은 지갑에서 미리 확보합니다.
+각 범주에서 해당 기능을 선택할 수 있습니다. `/savings deposit`에서 예금 또는 출금 방향을 선택합니다. 주식 주문은 종목 이름을 사용하며, 매수 주문 금액은 지갑에서 미리 확보합니다.
 
 ## 관리자 기능
 
