@@ -163,8 +163,8 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
                     )
                     send_private.assert_awaited_with(
                         interaction,
-                        f"**테스트** 주문 #7 · {action} 5주\n"
-                        "지정가 100 · 즉시 체결 2주 · 미체결 3주.",
+                        f"**테스트** · {action} 주문 #7\n"
+                        "5주 · 지정가 100 · 체결 2주 · 대기 3주",
                     )
                     place_order.reset_mock()
                     send_private.reset_mock()
@@ -293,8 +293,13 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertTrue(
-            all(not isinstance(command, main.app_commands.Group) for command in main.bot.tree.get_commands())
+            all(
+                isinstance(main.bot.tree.get_command(name), main.app_commands.Group)
+                for name, _ in main.COMMAND_CATEGORIES
+            )
         )
+        self.assertIsNotNone(main.get_command_by_path("stocks stock buy"))
+        self.assertIsNotNone(main.get_command_by_path("market create"))
 
     def test_stock_creation_command_is_available_under_market(self):
         command = main.ACTION_COMMANDS_BY_PATH.get("market create")
@@ -306,54 +311,65 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(command, main.ACTION_COMMANDS_BY_CATEGORY["market"])
 
+    def test_documented_core_features_have_registered_commands(self):
+        required_paths = {
+            "profile register",
+            "profile balance",
+            "profile history",
+            "savings currencies",
+            "savings transfer",
+            "savings exchange",
+            "savings deposit",
+            "loan request",
+            "loan repay",
+            "loan approve",
+            "storage vault list",
+            "storage vault add",
+            "requests submit",
+            "requests update",
+            "stocks stock list",
+            "stocks stock quote",
+            "stocks stock buy",
+            "stocks stock sell",
+            "stocks stock cancel",
+            "stocks portfolio",
+            "market create",
+            "market evaluate",
+            "market publish",
+            "market news",
+            "admin currency create",
+            "admin currency setrate",
+            "admin mint",
+            "admin freeze",
+            "admin supply",
+        }
+
+        self.assertTrue(required_paths.issubset(main.ACTION_COMMANDS_BY_PATH))
+
     def test_language_and_menu_commands_are_registered(self):
-        language = main.ACTION_COMMANDS_BY_PATH["profile language"]
         menu = main.bot.tree.get_command("menu")
         language_selector = main.bot.tree.get_command("language")
 
-        self.assertIsNotNone(language)
         self.assertIsNotNone(menu)
         self.assertIsNotNone(language_selector)
-        self.assertEqual(language_selector.parameters, [])
+        self.assertEqual(menu.parameters, [])
+        self.assertEqual(len(language_selector.parameters), 1)
         self.assertEqual(
-            {choice.value for choice in language.parameters[0].choices},
+            {choice.value for choice in language_selector.parameters[0].choices},
             {"ko", "en"},
         )
-        self.assertEqual(
-            [button.label for button in main.LanguageSelectView(123456).children],
-            ["한국어", "English"],
-        )
 
-    def test_menu_has_public_navigation_and_language_buttons(self):
-        view = main.BankMenuView(123456, "en")
+    def test_menu_is_text_only_and_lists_direct_commands(self):
+        embed = main.build_main_menu_embed("ko")
+        menu = main.bot.tree.get_command("menu")
 
-        self.assertEqual(
-            [option.value for option in view.children[0].options],
-            [
-                "profile",
-                "storage",
-                "requests",
-                "savings",
-                "loan",
-                "stocks",
-                "market",
-                "admin",
-            ],
-        )
-        labels = [button.label for button in view.children[1:]]
-        self.assertIn("Transfer", labels)
-        self.assertIn("Deposit", labels)
-        self.assertIn("Help", labels)
-        self.assertIn("Language: English", labels)
-        self.assertLessEqual(len(view.children), 25)
-        self.assertLessEqual(len(labels), 15)
-        stock_actions = main.CategoryActionView(123456, "en", "stocks")
-        self.assertIn(
-            "stocks stock buy",
-            {option.value for option in stock_actions.children[0].options},
-        )
+        self.assertIsNotNone(menu)
+        self.assertIn("/profile balance", embed.description)
+        self.assertIn("/stocks stock list", embed.description)
+        self.assertIn("/market create", embed.description)
+        self.assertNotIn("버튼", embed.description)
 
-    def test_menu_quick_actions_resolve_to_registered_commands(self):
+    def test_direct_slash_commands_resolve_without_menu_shortcuts(self):
         paths = list(main.MENU_COMMAND_PATHS.values())
         paths.extend(
             [
@@ -438,7 +454,10 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(modal, main.CommandActionModal)
         self.assertIs(modal.values["user"], selected_member)
         self.assertEqual(set(modal.inputs), {"reason"})
-        self.assertEqual(modal.inputs["reason"].label, "사유")
+        self.assertEqual(
+            modal.inputs["reason"].to_component_dict()["label"],
+            "사유",
+        )
 
     async def test_transfer_uses_selected_member_instead_of_typed_username(self):
         selected_member = SimpleNamespace(id=654321, display_name="Selected User")
@@ -461,17 +480,11 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(modal.initial_values["user"], selected_member)
         self.assertEqual(set(modal.inputs), {"currency", "amount"})
 
-    def test_command_descriptions_follow_the_saved_language_in_menus(self):
-        korean = main.build_category_embed("admin", "ko")
-        english = main.build_category_embed("admin", "en")
-        korean_options = main.CategoryActionView(
-            123456, "ko", "admin"
-        ).children[0].options
+    def test_native_stock_command_descriptions_follow_the_saved_language(self):
+        command = main.ACTION_COMMANDS_BY_PATH["market create"]
 
-        self.assertRegex(korean.title, r"[가-힣]")
-        self.assertRegex(korean.description, r"[가-힣]")
-        self.assertNotRegex(english.description, r"[가-힣]")
-        self.assertRegex(korean_options[0].description, r"[가-힣]")
+        self.assertRegex(main.localized_command_description(command, "ko"), r"[가-힣]")
+        self.assertNotRegex(main.localized_command_description(command, "en"), r"[가-힣]")
 
     async def test_action_modal_parses_choices_and_enforces_numeric_ranges(self):
         evaluation = main.get_command_by_path("market evaluate")
@@ -533,6 +546,13 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         await main.require_action_permission(
             SimpleNamespace(user=admin_role_user), command
         )
+        for allowed_user in (admin_user, server_manager, admin_role_user):
+            self.assertTrue(
+                await command.checks[0](SimpleNamespace(user=allowed_user))
+            )
+        self.assertFalse(
+            await command.checks[0](SimpleNamespace(user=regular_user))
+        )
 
     def test_help_lists_only_english_slash_commands(self):
         lines = main.build_help_embed("ko").description.splitlines()
@@ -564,6 +584,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             if isinstance(command, main.app_commands.Group):
                 continue
             for parameter in command.parameters:
+                self.assertNotRegex(parameter.name, r"[가-힣]")
                 self.assertNotRegex(parameter.description, r"[가-힣]")
                 for choice in parameter.choices:
                     self.assertNotRegex(choice.name, r"[가-힣]")
@@ -697,7 +718,8 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(embed.fields), 2)
         self.assertIn("Wallet", embed.fields[0].value)
         self.assertIn("588,000 B", embed.fields[0].value)
-        self.assertIn(main.ACCOUNT_SECTION_DIVIDER, embed.fields[0].value)
+        self.assertNotIn("────────", embed.fields[0].value)
+        self.assertNotIn("------", embed.fields[0].value)
         self.assertIn("Savings", embed.fields[0].value)
         self.assertIn("28,000 B", embed.fields[0].value)
         self.assertIn("803 BR", embed.fields[1].value)
@@ -765,12 +787,23 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_language_setting_translates_known_messages_and_keeps_korean(self):
-        original = "계좌가 없습니다. 먼저 `/menu`에서 계좌 개설을 선택하세요."
+        original = "계좌가 없습니다. 먼저 `/profile register`를 실행하세요."
         self.assertEqual(
             translate_message(original, "en"),
-            "You do not have an account. Open `/menu` and choose account registration first.",
+            "You do not have an account. Run `/profile register` first.",
         )
         self.assertEqual(translate_message(original, "ko"), original)
+
+    def test_stock_order_summary_uses_concise_english_copy(self):
+        message = (
+            "**테스트** · 매수 주문 #7\n"
+            "5주 · 지정가 100 · 체결 2주 · 대기 3주"
+        )
+        self.assertEqual(
+            translate_message(message, "en"),
+            "**테스트** · Buy order #7\n"
+            "5 shares · limit 100 · filled 2 · open 3",
+        )
 
     def test_unknown_english_response_is_not_silently_left_in_korean(self):
         translated = translate_message("이 문구에는 아직 번역이 없습니다.", "en")
@@ -788,25 +821,41 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(pool.connection.execute_args, ("123456", "en"))
         self.assertEqual(pool.connection.fetch_user_id, "123456")
 
-    async def test_language_button_saves_preference_and_confirms_selection(self):
+    async def test_language_command_saves_the_selected_preference(self):
         pool = FakePool()
-        response = SimpleNamespace(edit_message=AsyncMock())
         interaction = SimpleNamespace(
             user=SimpleNamespace(id=123456),
-            response=response,
         )
 
-        with patch.object(main, "pool", pool, create=True):
-            await main.LanguageSelectView(123456).select_language(
-                interaction, "en"
+        with (
+            patch.object(main, "pool", pool, create=True),
+            patch.object(main, "send_public", new=AsyncMock()) as send_public,
+        ):
+            await main.bot.tree.get_command("language").callback(
+                interaction,
+                main.app_commands.Choice(name="English", value="en"),
             )
             saved_language = await main.get_user_language(123456)
 
         self.assertEqual(saved_language, "en")
-        response.edit_message.assert_awaited_once()
-        confirmation = response.edit_message.await_args.kwargs
-        self.assertEqual(confirmation["embed"].title, "Language updated")
-        self.assertIsNone(confirmation["view"])
+        send_public.assert_awaited_once_with(
+            interaction, "Your bot language is now English.", language="en"
+        )
+
+    async def test_menu_command_sends_no_buttons(self):
+        interaction = SimpleNamespace(user=SimpleNamespace(id=123456))
+        with (
+            patch.object(main, "get_user_language", AsyncMock(return_value="ko")),
+            patch.object(main, "send_public", new=AsyncMock()) as send_public,
+        ):
+            await main.bot.tree.get_command("menu").callback(interaction)
+
+        send_public.assert_awaited_once()
+        self.assertNotIn("view", send_public.await_args.kwargs)
+        self.assertIn(
+            "/market create",
+            send_public.await_args.kwargs["embed"].description,
+        )
 
     async def test_all_public_command_replies_use_the_saved_language(self):
         pool = FakePool()
@@ -818,7 +867,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             user=SimpleNamespace(id=123456),
             response=response,
         )
-        source = "계좌가 없습니다. 먼저 `/menu`에서 계좌 개설을 선택하세요."
+        source = "계좌가 없습니다. 먼저 `/profile register`를 실행하세요."
 
         with patch.object(main, "pool", pool, create=True):
             await main.set_user_language(123456, "en")
@@ -828,7 +877,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("content", message)
         self.assertEqual(
             message["embed"].description,
-            "You do not have an account. Open `/menu` and choose account registration first.",
+            "You do not have an account. Run `/profile register` first.",
         )
         self.assertEqual(message["embed"].color.value, main.BANK_GOLD)
 

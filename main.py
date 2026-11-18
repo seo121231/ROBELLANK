@@ -29,7 +29,6 @@ pool: asyncpg.Pool
 
 ADMIN_DESCRIPTION_PREFIX = "Admin only · "
 BANK_GOLD = 0xD7B43B
-ACCOUNT_SECTION_DIVIDER = "────────────"
 COMMAND_CATEGORIES = (
     ("profile", "Accounts, balances, tier, history, and language"),
     ("storage", "Bank storage and item requests"),
@@ -59,7 +58,7 @@ COMMAND_DESCRIPTION_KO = {
     "stocks": "가상주식 거래와 보유 현황",
     "market": "주식 상장, 평가 및 공지",
     "admin": "은행 설정과 계좌 관리",
-    "menu": "은행 메뉴와 주식 목록을 엽니다",
+    "menu": "주요 명령어를 안내합니다",
     "language": "봇 응답 언어를 한국어 또는 영어로 설정합니다",
     "help": "은행 봇 사용법과 전체 명령어를 확인합니다",
     "admin currency delete": "관리자: 재화를 사용 중지하고 기존 기록을 보존합니다",
@@ -277,6 +276,8 @@ def configure_command_registry(tree: app_commands.CommandTree) -> None:
             command.description = english_description
             continue
 
+        if command.checks:
+            command.checks[:] = [server_admin_command_check]
         description = remove_admin_prefix(command.description)
         korean_description = COMMAND_DESCRIPTION_KO.get(
             command.qualified_name, description
@@ -548,6 +549,10 @@ def has_server_admin_access(member: discord.abc.User | discord.Member) -> bool:
     return False
 
 
+async def server_admin_command_check(interaction: discord.Interaction) -> bool:
+    return has_server_admin_access(interaction.user)
+
+
 def tier_at_least(tier: str, minimum: str) -> bool:
     return TIER_ORDER.get(tier, 0) >= TIER_ORDER[minimum]
 
@@ -617,7 +622,7 @@ async def account(
         user_id,
     )
     if not row:
-        raise ValueError("계좌가 없습니다. 먼저 `/menu`에서 계좌 개설을 선택하세요.")
+        raise ValueError("계좌가 없습니다. 먼저 `/profile register`를 실행하세요.")
     if row["frozen"] and not allow_frozen:
         raise ValueError("계좌가 동결되어 거래할 수 없습니다. 관리자에게 문의하세요.")
     return row
@@ -1002,7 +1007,7 @@ def build_account_embed(
             name=label,
             value=(
                 f"**{wallet_label}**\n{fmt(row['wallet'] or 0)} {symbol}\n"
-                f"\n{ACCOUNT_SECTION_DIVIDER}\n\n"
+                "\n"
                 f"**{savings_label}**\n{fmt(row['deposit'] or 0)} {symbol}"
             ),
             inline=False,
@@ -1060,7 +1065,6 @@ async def balance(
         await send_public(
             interaction,
             embed=build_account_embed(target, rows, acct["frozen"], language),
-            view=BankMenuView(interaction.user.id, language),
             language=language,
         )
 
@@ -1457,7 +1461,7 @@ def table_embed(rows: list[asyncpg.Record], page: int) -> discord.Embed:
         description="```text\n"
         + "\n".join(lines)
         + "\n```\n"
-        + "기준가·시가총액은 참고값이며 실제 체결가는 주문 매칭 결과에 따릅니다.",
+        + "기준가와 시가총액은 참고값입니다. 체결가는 주문 결과에 따라 달라집니다.",
         color=BANK_GOLD,
     )
     embed.set_footer(text=f"상장 종목 {len(rows)}개 · 이름순 정렬")
@@ -1474,8 +1478,7 @@ async def stock_list(interaction: discord.Interaction) -> None:
         embed = discord.Embed(
             title="길드 가상주식",
             description=(
-                "종목 이름으로 검색·주문합니다. 기준가는 참고 가격이며 "
-                "체결 가격은 주문 매칭 결과에 따릅니다."
+                "기준가는 참고값이며, 체결가는 주문 결과에 따라 달라집니다."
             ),
             color=BANK_GOLD,
         )
@@ -1488,14 +1491,14 @@ async def stock_list(interaction: discord.Interaction) -> None:
             embed.add_field(
                 name=stock["name"],
                 value=(
-                    f"기준가 **{fmt(stock['current_price'])}** · 일간 {change}\n"
+                    f"기준가 **{fmt(stock['current_price'])}** · 변동 {change}\n"
                     f"유통 {fmt(stock['total_shares'])}주 · "
                     f"시가총액 {fmt(stock['market_cap'])}"
                 ),
                 inline=False,
             )
         embed.set_footer(
-            text=f"총 {len(rows)}종목 · 자세한 내용은 /stocks stock quote"
+            text=f"총 {len(rows)}종목 · 상세 조회: /stocks stock quote"
             if len(rows) <= 24
             else f"총 {len(rows)}종목 · 목록에는 이름순 24종목 표시"
         )
@@ -1528,7 +1531,7 @@ async def stock_table(interaction: discord.Interaction) -> None:
 
 
 @stock_group.command(
-    name="quote", description="종목 소개·시세·호가·평가를 자세히 확인합니다"
+    name="quote", description="종목 소개·시세·호가·평가를 확인합니다"
 )
 async def stock_quote(interaction: discord.Interaction, stock: str) -> None:
     async def run():
@@ -1585,14 +1588,14 @@ async def stock_quote(interaction: discord.Interaction, stock: str) -> None:
         if evaluation:
             if is_unscored_market_evaluation(evaluation):
                 eval_text = (
-                    f"평가일 {evaluation['evaluation_date']}\n"
-                    f"점수 미등록 · 무작위 변동 {signed(evaluation['change_percent'])}% "
-                    "(하루 -10%~+10%)\n"
-                    f"가격 {fmt(evaluation['old_price'])} → {fmt(evaluation['new_price'])}"
+                    f"{evaluation['evaluation_date']} · 미평가 · "
+                    f"무작위 변동 {signed(evaluation['change_percent'])}%\n"
+                    f"{fmt(evaluation['old_price'])} → {fmt(evaluation['new_price'])}"
                 )
             else:
                 eval_text = (
-                    f"평가일 {evaluation['evaluation_date']}\n기본 {signed(evaluation['base_score'])}점 + 무작위 {signed(evaluation['random_score'])}점 = **{signed(evaluation['final_score'])}점**\n"
+                    f"{evaluation['evaluation_date']} · 기본 {signed(evaluation['base_score'])}점 + "
+                    f"무작위 {signed(evaluation['random_score'])}점 = **{signed(evaluation['final_score'])}점**\n"
                     f"콘텐츠 {signed(evaluation['content_score'])}/6 · "
                     f"활동 {signed(evaluation['activity_score'])}/6 · "
                     f"인원 {signed(evaluation['membership_score'])}/5\n"
@@ -1607,31 +1610,31 @@ async def stock_quote(interaction: discord.Interaction, stock: str) -> None:
             eval_text = "아직 공개된 평가가 없습니다."
         embed = discord.Embed(
             title=row["name"],
-            description=row["description"] or "종목 소개가 아직 등록되지 않았습니다.",
-        color=BANK_GOLD,
+            description=row["description"] or "소개가 등록되지 않았습니다.",
+            color=BANK_GOLD,
         )
         embed.add_field(
-            name="현재 기준가",
+            name="기준가",
             value=f"{fmt(row['current_price'])} 기본재화"
             + (f" · {signed(evaluation['change_percent'])}%" if evaluation else ""),
             inline=True,
         )
         embed.add_field(
-            name="발행·유통 규모",
-            value=f"{fmt(row['total_shares'])}주\n시가총액 {fmt(row['market_cap'])} 기본재화",
+            name="유통량",
+            value=f"{fmt(row['total_shares'])}주 · 시가총액 {fmt(row['market_cap'])}",
             inline=True,
         )
         embed.add_field(
-            name="주문 호가",
+            name="호가",
             value=(
-                f"최고 매수: {fmt(book['best_bid']) if book['best_bid'] is not None else '없음'}"
+                f"매수 {fmt(book['best_bid']) if book['best_bid'] is not None else '없음'}"
                 f" · {fmt(book['bid_shares'])}주\n"
-                f"최저 매도: {fmt(book['best_ask']) if book['best_ask'] is not None else '없음'}"
+                f"매도 {fmt(book['best_ask']) if book['best_ask'] is not None else '없음'}"
                 f" · {fmt(book['ask_shares'])}주"
             ),
             inline=False,
         )
-        embed.add_field(name="최근 세부 평가", value=eval_text, inline=False)
+        embed.add_field(name="최근 평가", value=eval_text, inline=False)
         if evaluation:
             embed.add_field(
                 name="평가 근거", value=evaluation["evidence"], inline=False
@@ -1883,15 +1886,15 @@ async def _submit_stock_order(
         action = "매수" if side == "buy" else "매도"
         await send_private(
             interaction,
-            f"**{result['stock']['name']}** 주문 #{result['order_id']} · {action} {fmt(shares)}주\n"
-            f"지정가 {fmt(limit_price)} · 즉시 체결 {fmt(result['filled'])}주 · "
-            f"미체결 {fmt(result['remaining'])}주.",
+            f"**{result['stock']['name']}** · {action} 주문 #{result['order_id']}\n"
+            f"{fmt(shares)}주 · 지정가 {fmt(limit_price)} · "
+            f"체결 {fmt(result['filled'])}주 · 대기 {fmt(result['remaining'])}주",
         )
 
     await safe_command(interaction, run)
 
 
-@stock_group.command(name="buy", description="지정가 매수 주문을 냅니다")
+@stock_group.command(name="buy", description="지정가로 주식을 매수합니다")
 async def stock_buy(
     interaction: discord.Interaction,
     stock: str,
@@ -1901,7 +1904,7 @@ async def stock_buy(
     await _submit_stock_order(interaction, stock, shares, limit_price, "buy")
 
 
-@stock_group.command(name="sell", description="보유 주식의 지정가 매도 주문을 냅니다")
+@stock_group.command(name="sell", description="보유 주식을 지정가로 매도합니다")
 async def stock_sell(
     interaction: discord.Interaction,
     stock: str,
@@ -1993,7 +1996,7 @@ async def stock_cancel(
 
 
 @bot.tree.command(
-    name="portfolio", description="보유 주식과 현재 기준 평가액을 확인합니다"
+    name="portfolio", description="보유 주식과 평가액을 확인합니다"
 )
 async def portfolio(interaction: discord.Interaction) -> None:
     async def run():
@@ -2015,7 +2018,7 @@ async def portfolio(interaction: discord.Interaction) -> None:
             return
         embed = discord.Embed(
             title="내 가상주식 포트폴리오",
-            description="현재 기준가로 계산한 참고 평가액입니다. 실제 매도 금액과 다를 수 있습니다.",
+            description="평가액은 기준가로 계산한 참고값입니다.",
             color=BANK_GOLD,
         )
         for row in rows[:24]:
@@ -2046,12 +2049,16 @@ async def help_command(interaction: discord.Interaction) -> None:
 
 
 def build_help_embed(language: str) -> discord.Embed:
+    command_order = (
+        "menu",
+        "language",
+        *(name for name, _ in COMMAND_CATEGORIES),
+    )
     lines = [
-        f"/{command.name}"
-        for command in bot.tree.get_commands()
-        if command.name != "help"
+        f"/{name}" for name in command_order if bot.tree.get_command(name)
     ]
-    lines.append("/help")
+    if bot.tree.get_command("help"):
+        lines.append("/help")
     return discord.Embed(
         description="\n".join(lines),
         color=BANK_GOLD,
@@ -2094,17 +2101,18 @@ def build_main_menu_embed(language: str) -> discord.Embed:
         return discord.Embed(
             title="ROBELLANK Bank",
             description=(
-                "Choose a category from the menu below to see its commands. You can also "
-                "open help, browse stocks, or switch languages. Your language choice is "
-                "saved to your Discord account."
+                "Run commands directly from Discord's slash menu.\n"
+                "Account: `/profile balance` · Stocks: `/stocks stock list`\n"
+                "List a stock: `/market create` · Help: `/help` · Language: `/language`"
             ),
             color=BANK_GOLD,
         )
     return discord.Embed(
         title="ROBELLANK 은행",
         description=(
-            "아래 범주 선택 메뉴에서 각 기능과 명령을 확인할 수 있습니다. "
-            "도움말, 주식 목록, 표시 언어도 여기서 바꿀 수 있습니다."
+            "필요한 기능을 슬래시 명령어에서 바로 실행하세요.\n"
+            "계좌: `/profile balance` · 주식: `/stocks stock list`\n"
+            "주식 상장: `/market create` · 도움말: `/help` · 언어: `/language`"
         ),
         color=BANK_GOLD,
     )
@@ -2117,9 +2125,9 @@ def build_stock_list_embed(
     embed = discord.Embed(
         title="Guild stocks" if english else "길드 가상주식",
         description=(
-            "Reference prices are informational; trades execute at matched order prices."
+            "Reference prices are estimates. Final prices depend on matched orders."
             if english
-            else "기준가는 참고 가격이며 실제 체결가는 주문 매칭 결과에 따릅니다."
+            else "기준가는 참고값이며, 체결가는 주문 결과에 따라 달라집니다."
         ),
         color=BANK_GOLD,
     )
@@ -2138,10 +2146,10 @@ def build_stock_list_embed(
         embed.add_field(
             name=stock["name"],
             value=(
-                f"Reference price **{fmt(stock['current_price'])}** · daily {change}\n"
+                f"Reference price **{fmt(stock['current_price'])}** · change {change}\n"
                 f"{fmt(stock['total_shares'])} shares · Market cap {fmt(stock['market_cap'])}"
                 if english
-                else f"기준가 **{fmt(stock['current_price'])}** · 일간 {change}\n"
+                else f"기준가 **{fmt(stock['current_price'])}** · 변동 {change}\n"
                 f"유통 {fmt(stock['total_shares'])}주 · 시가총액 {fmt(stock['market_cap'])}"
             ),
             inline=False,
@@ -2149,7 +2157,7 @@ def build_stock_list_embed(
     if english:
         embed.set_footer(text=f"{len(rows)} listed stocks")
     else:
-        embed.set_footer(text=f"총 {len(rows)}종목 · 자세한 내용은 /stocks stock quote")
+        embed.set_footer(text=f"총 {len(rows)}종목 · 상세 조회: /stocks stock quote")
     return embed
 
 
@@ -2957,13 +2965,13 @@ class ContinueActionView(discord.ui.View):
             state = PENDING_ACTIONS.get(self.state_id)
             if state is None:
                 await send_private(
-                    interaction, "양식이 만료되었습니다. 메뉴에서 다시 시작해 주세요."
+                    interaction, "양식이 만료되었습니다. 명령어를 다시 실행하세요."
                 )
                 return
             if datetime.now(UTC) > state["expires_at"]:
                 PENDING_ACTIONS.pop(self.state_id, None)
                 await send_private(
-                    interaction, "양식이 만료되었습니다. 메뉴에서 다시 시작해 주세요."
+                    interaction, "양식이 만료되었습니다. 명령어를 다시 실행하세요."
                 )
                 return
             await interaction.response.send_modal(
@@ -3348,13 +3356,12 @@ class MemberSelectView(discord.ui.View):
         )
 
 
-@bot.tree.command(name="menu", description="은행 메뉴와 주식 목록을 엽니다")
+@bot.tree.command(name="menu", description="주요 명령어를 안내합니다")
 async def menu_command(interaction: discord.Interaction) -> None:
     language = await get_user_language(interaction.user.id)
     await send_public(
         interaction,
         embed=build_main_menu_embed(language),
-        view=BankMenuView(interaction.user.id, language),
         language=language,
     )
 
@@ -6327,8 +6334,6 @@ def organize_command_categories(tree: app_commands.CommandTree) -> None:
             "tier": "tier",
             "history": "history",
             "leaderboard": "leaderboard",
-            "menu": "menu",
-            "language": "language",
         },
         "savings": {
             "transfer": "transfer",
@@ -6491,99 +6496,11 @@ def register_menu_command_tree(tree: app_commands.CommandTree) -> None:
             if isinstance(command, app_commands.Group):
                 continue
             path = command.qualified_name
-            if path in {"help", "profile menu"}:
+            if path in {"help", "menu", "language"}:
                 continue
             category = path.split()[0]
             ACTION_COMMANDS_BY_PATH[path] = command
             ACTION_COMMANDS_BY_CATEGORY.setdefault(category, []).append(command)
-
-    for root in list(tree.get_commands()):
-        tree.remove_command(root.name)
-
-    async def open_main_menu(interaction: discord.Interaction) -> None:
-        language = await get_user_language(interaction.user.id)
-        await send_public(
-            interaction,
-            embed=build_main_menu_embed(language),
-            view=BankMenuView(interaction.user.id, language),
-            language=language,
-        )
-
-    async def open_language_selector(interaction: discord.Interaction) -> None:
-        language = await get_user_language(interaction.user.id)
-        await send_public(
-            interaction,
-            embed=build_language_embed(language),
-            view=LanguageSelectView(interaction.user.id),
-            language=language,
-        )
-
-    def make_category_callback(category: str):
-        async def open_category(interaction: discord.Interaction) -> None:
-            if category == "admin" and not has_server_admin_access(interaction.user):
-                await send_public(
-                    interaction,
-                    "이 메뉴는 서버 관리자만 사용할 수 있습니다.",
-                )
-                return
-            language = await get_user_language(interaction.user.id)
-            await send_public(
-                interaction,
-                embed=build_category_embed(category, language),
-                view=CategoryActionView(interaction.user.id, language, category),
-                language=language,
-            )
-
-        return open_category
-
-    async def show_help(interaction: discord.Interaction) -> None:
-        language = await get_user_language(interaction.user.id)
-        await send_public(
-            interaction,
-            embed=build_help_embed(language),
-            language=language,
-        )
-
-    tree.add_command(
-        app_commands.Command(
-            name="menu",
-            description="Open the bank action menu",
-            callback=open_main_menu,
-        )
-    )
-    tree.add_command(
-        app_commands.Command(
-            name="language",
-            description="Choose Korean or English for bot responses",
-            callback=open_language_selector,
-        )
-    )
-
-    descriptions = {
-        "profile": "Open account, balance, tier, and history actions",
-        "storage": "Open bank storage actions",
-        "requests": "Open bank item request actions",
-        "savings": "Open transfer, deposit, and currency actions",
-        "loan": "Open loan request and repayment actions",
-        "stocks": "Open stock trading and portfolio actions",
-        "market": "Open market and stock listing actions",
-        "admin": "Open administrator bank controls",
-    }
-    for category, _ in COMMAND_CATEGORIES:
-        command = app_commands.Command(
-            name=category,
-            description=descriptions[category],
-            callback=make_category_callback(category),
-        )
-        tree.add_command(command)
-
-    tree.add_command(
-        app_commands.Command(
-            name="help",
-            description="List available commands",
-            callback=show_help,
-        )
-    )
 
 
 organize_command_categories(bot.tree)

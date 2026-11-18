@@ -14,7 +14,7 @@ STATIC_EN = {
     "이 양식을 연 사용자만 제출할 수 있습니다.": "Only the user who opened this form can submit it.",
     "해당 사용자가 이 서버에 없습니다.": "That member is not in this server.",
     "작업을 완료하지 못했습니다. 다시 시도하거나 관리자에게 문의하세요.": "The action could not be completed. Please try again or contact an administrator.",
-    "양식이 만료되었습니다. 메뉴에서 다시 시작해 주세요.": "This form has expired. Start again from the menu.",
+    "양식이 만료되었습니다. 명령어를 다시 실행하세요.": "This form has expired. Run the command again.",
     "이 양식을 시작한 사용자만 계속할 수 있습니다.": "Only the user who started this form can continue.",
     "이 사용자 선택 화면을 연 사용자만 사용할 수 있습니다.": "Only the user who opened this user picker can use it.",
     "이 메뉴를 연 사용자만 사용할 수 있습니다.": "Only the user who opened this menu can use it.",
@@ -67,7 +67,11 @@ STATIC_EN = {
     "서로 다른 재화를 선택하세요.": "Choose two different currencies.",
     "환전 결과가 1 미만입니다. 더 큰 금액을 입력하세요.": "The exchange result is less than 1. Enter a larger amount.",
     "이 계좌는 동결되어 거래할 수 없습니다. 관리자에게 문의하세요.": "This account is frozen. Contact a server administrator.",
-    "계좌가 없습니다. 먼저 `/menu`에서 계좌 개설을 선택하세요.": "You do not have an account. Open `/menu` and choose account registration first.",
+    "계좌가 없습니다. 먼저 `/profile register`를 실행하세요.": "You do not have an account. Run `/profile register` first.",
+    "기준가는 참고값이며, 체결가는 주문 결과에 따라 달라집니다.": "Reference prices are estimates; final prices depend on matched orders.",
+    "기준가와 시가총액은 참고값입니다. 체결가는 주문 결과에 따라 달라집니다.": "Reference prices and market cap are estimates. Final prices depend on matched orders.",
+    "평가액은 기준가로 계산한 참고값입니다.": "Values are estimates based on the reference price.",
+    "소개가 등록되지 않았습니다.": "No description is available.",
     "취소할 수 있는 본인 주문이 없습니다.": "You have no open order that can be canceled.",
     "상환 가능한 본인 대출을 찾을 수 없습니다.": "No repayable loan was found for your account.",
     "연장할 수 있는 본인 대출을 찾을 수 없습니다.": "No loan that can be extended was found for your account.",
@@ -135,14 +139,27 @@ STATIC_EN = {
     "ROBELLANK 은행 봇 도움말": "ROBELLANK Bank Bot Help",
     "ROBELLANK 은행 봇": "ROBELLANK Bank Bot",
     "내 가상주식 포트폴리오": "My Virtual Stock Portfolio",
-    "현재 기준가": "Current reference price",
+    "기준가": "Reference price",
     "발행·유통 규모": "Issued and circulating shares",
     "주문 호가": "Order book",
-    "최근 세부 평가": "Latest evaluation",
+    "호가": "Order book",
+    "최근 평가": "Latest evaluation",
     "평가 근거": "Evaluation evidence",
     "최근 체결": "Recent trades",
     "평가 전": "Not evaluated",
-    "기준가": "Reference price",
+    "변동": "Change",
+    "미평가": "Not evaluated",
+    "기본": "Base",
+    "무작위": "Random",
+    "콘텐츠": "Content",
+    "활동": "Activity",
+    "인원": "Members",
+    "사건": "Events",
+    "성장": "Growth",
+    "영향력": "Influence",
+    "여론": "Sentiment",
+    "가격": "Price",
+    "점": " pts",
     "일간 변동": "Daily change",
     "유통량": "Circulating shares",
     "시가총액": "Market cap",
@@ -188,14 +205,14 @@ STATIC_EN = {
     "내 등급, 신용점수, 은행 혜택을 확인합니다": "View your tier, credit score, and bank benefits",
     "상장 종목 목록": "List listed stocks",
     "상장된 모든 종목을 표로 확인합니다": "View all listed stocks in a table",
-    "종목 소개·시세·호가·평가를 자세히 확인합니다": "View stock details, prices, order book, and evaluations",
-    "지정가 매수 주문을 냅니다": "Place a limit buy order",
-    "보유 주식의 지정가 매도 주문을 냅니다": "Place a limit sell order for shares you own",
+    "종목 소개·시세·호가·평가를 확인합니다": "View stock details, prices, orders, and evaluation",
+    "지정가로 주식을 매수합니다": "Buy shares at a limit price",
+    "보유 주식을 지정가로 매도합니다": "Sell shares at a limit price",
     "내 미체결 주문을 확인합니다": "View your open orders",
     "본인 미체결 주문을 취소합니다": "Cancel one of your open orders",
-    "보유 주식과 현재 기준 평가액을 확인합니다": "View your stock holdings and current reference value",
+    "보유 주식과 평가액을 확인합니다": "View your shares and estimated value",
     "은행 봇 사용법과 전체 명령어를 확인합니다": "View bank bot help and all commands",
-    "은행 메뉴와 주식 목록을 엽니다": "Open the bank menu and stock list",
+    "주요 명령어를 안내합니다": "Show commonly used commands",
     "봇 응답 언어를 한국어 또는 English로 설정합니다": "Set the bot response language to Korean or English",
     "골드 이상: 벨 신용 대출을 신청합니다": "Gold tier and above: apply for a Bell credit loan",
     "실버 이상: 게임에서 확인받을 담보 대출을 신청합니다": "Silver tier and above: apply for an in-game collateral loan",
@@ -269,10 +286,13 @@ LABEL_EN = (
     ("지정가", "Limit price"),
     ("최근 체결", "Recent trades"),
     ("최근 세부 평가", "Latest evaluation"),
+    ("최근 평가", "Latest evaluation"),
     ("평가 근거", "Evaluation evidence"),
     ("주문 호가", "Order book"),
+    ("호가", "Order book"),
     ("최고 매수", "Best bid"),
     ("최저 매도", "Best ask"),
+    ("변동", "Change"),
     ("원금", "Principal"),
     ("남은 원리금", "Remaining balance"),
     ("확인 가치", "Verified value"),
@@ -291,6 +311,46 @@ LABEL_EN = (
 
 
 PATTERNS = [
+    (
+        re.compile(
+            r"^\*\*(?P<stock>.+)\*\* · (?P<side>매수|매도) 주문 #(?P<id>\d+)\n"
+            r"(?P<shares>[\d,]+)주 · 지정가 (?P<price>[\d,]+) · "
+            r"체결 (?P<filled>[\d,]+)주 · 대기 (?P<remaining>[\d,]+)주$",
+            re.S,
+        ),
+        lambda m: f"**{m['stock']}** · {'Buy' if m['side'] == '매수' else 'Sell'} order #{m['id']}\n"
+        f"{m['shares']} shares · limit {m['price']} · filled {m['filled']} · open {m['remaining']}",
+    ),
+    (
+        re.compile(
+            r"^(?P<date>\d{4}-\d{2}-\d{2}) · 미평가 · 무작위 변동 "
+            r"(?P<change>[+-]?\d+)%\n(?P<old>[\d,]+) → (?P<new>[\d,]+)$",
+            re.S,
+        ),
+        lambda m: f"{m['date']} · Not evaluated · random change {m['change']}%\n"
+        f"{m['old']} → {m['new']}",
+    ),
+    (
+        re.compile(
+            r"^(?P<date>\d{4}-\d{2}-\d{2}) · 기본 (?P<base>[+-]?\d+)점 \+ "
+            r"무작위 (?P<random>[+-]?\d+)점 = \*\*(?P<final>[+-]?\d+)점\*\*\n"
+            r"콘텐츠 (?P<content>[+-]?\d+)/6 · 활동 (?P<activity>[+-]?\d+)/6 · "
+            r"인원 (?P<members>[+-]?\d+)/5\n사건 (?P<events>[+-]?\d+)/8 · "
+            r"성장 (?P<growth>[+-]?\d+)/5 · 영향력 (?P<influence>[+-]?\d+)/5 · "
+            r"여론 (?P<sentiment>[+-]?\d+)/5\n가격 (?P<old>[\d,]+) → "
+            r"(?P<new>[\d,]+) \((?P<change>[+-]?\d+)%\)$",
+            re.S,
+        ),
+        lambda m: (
+            f"{m['date']} · Base {m['base']} pts + random {m['random']} pts = "
+            f"**{m['final']} pts**\n"
+            f"Content {m['content']}/6 · Activity {m['activity']}/6 · "
+            f"Members {m['members']}/5\n"
+            f"Events {m['events']}/8 · Growth {m['growth']}/5 · "
+            f"Influence {m['influence']}/5 · Sentiment {m['sentiment']}/5\n"
+            f"Price {m['old']} → {m['new']} ({m['change']}%)"
+        ),
+    ),
     (
         re.compile(
             r"^(?P<amount>[\d,]+) (?P<currency>.+)을 예금했습니다\. 이자는 매일 한국 시간 자정에 반영됩니다\.$",

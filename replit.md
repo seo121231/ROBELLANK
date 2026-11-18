@@ -5,12 +5,12 @@ Discord 서버에서 가상 통화·계좌와 길드 가상주식 시장을 운�
 ## Run & Operate
 
 - `pnpm --filter @workspace/api-server run dev` — run the API server (port 8080)
-- `pnpm --filter @workspace/robellank-bankbot run dev` — run the ROBELLANK Discord bank bot
+- `uv run python main.py` — run the active ROBELLANK Discord bank bot
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
 - `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- Required env: `DATABASE_URL` and `DISCORD_TOKEN` or `DISCORD_BOT_TOKEN`
 - Optional env: `DISCORD_GUILD_ID` — remove any legacy server-specific command copies from this server; slash commands are synced globally to avoid duplicates
 
 ## Stack
@@ -24,7 +24,8 @@ Discord 서버에서 가상 통화·계좌와 길드 가상주식 시장을 운�
 
 ## Where things live
 
-- `artifacts/robellank-bankbot` — Discord slash commands, interaction handlers, bank and market operations, and Korean command guide
+- `main.py` and `localization.py` — active Python Discord bot commands, bank and market operations, and Korean/English replies
+- `artifacts/robellank-bankbot` — separate TypeScript bot package; the configured `ROBELLANK Bank Bot` workflow runs `main.py`
 - `lib/db/src/schema/index.ts` — PostgreSQL schema for accounts, currencies, transactions, loans, stocks, orders, evaluations, and news
 - `artifacts/api-server` — shared API scaffold, separate from the Discord bot process
 
@@ -35,7 +36,7 @@ Discord 서버에서 가상 통화·계좌와 길드 가상주식 시장을 운�
 - Buy order funds are escrowed; open orders are refunded when cancelled or at the daily market close.
 - Guild stocks are found by unique display name rather than ticker; trades and holdings remain linked by immutable internal stock IDs, and stock listings carry a user-facing description.
 - Discord tier roles are assigned manually by server administrators; the bot must never grant or change roles. New bank accounts start at 50 credit points.
-- Game currency is verified by an administrator in-game and then issued to the bank through the confirmed `/other mint` flow; users do not self-register currency balances.
+- Game currency is verified by an administrator in-game and then issued to the bank through the confirmed `/admin mint` flow; users do not self-register currency balances.
 
 ## Product
 
@@ -46,7 +47,7 @@ Discord 서버에서 가상 통화·계좌와 길드 가상주식 시장을 운�
 ## User preferences
 
 - Normal bot replies default to Korean. Slash command names remain English; command explanations in bot menus and forms follow each user's saved language. Discord's native slash-command picker descriptions follow each user's Discord client locale. `/help` lists command names only, one per line.
-- Keep 8–15 top-level slash command entry points and use buttons for common multi-step actions.
+- Keep 8–15 top-level slash command entry points. Use text-only menu guidance; reserve buttons for confirmations and settings.
 - The investment system is a guild virtual-stock exchange based on the supplied ROBELLANK operating rules, not fixed-term investment products.
 
 ## Gotchas
