@@ -29,6 +29,8 @@ pool: asyncpg.Pool
 
 ADMIN_DESCRIPTION_PREFIX = "Admin only · "
 BANK_GOLD = 0xD7B43B
+MESSAGE_CHUNK_LIMIT = 1800
+CATEGORY_PAGE_SIZE = 12
 COMMAND_CATEGORIES = (
     ("profile", "Accounts, balances, tier, history, and language"),
     ("storage", "Bank storage and item requests"),
@@ -36,7 +38,7 @@ COMMAND_CATEGORIES = (
     ("savings", "Currency, transfers, exchanges, and deposits"),
     ("loan", "Loan requests, repayments, and reviews"),
     ("stocks", "Virtual stock trading and holdings"),
-    ("market", "Stock listings, evaluations, and announcements"),
+    ("market", "Market announcements"),
     ("admin", "Administrative bank settings and account controls"),
 )
 CATEGORY_LABELS = {
@@ -56,13 +58,17 @@ COMMAND_DESCRIPTION_KO = {
     "savings": "재화, 송금, 환전 및 예금",
     "loan": "대출 신청, 상환 및 심사",
     "stocks": "가상주식 거래와 보유 현황",
-    "market": "주식 상장, 평가 및 공지",
+    "market": "시장 공지 조회",
     "admin": "은행 설정과 계좌 관리",
     "menu": "주요 명령어를 안내합니다",
     "language": "봇 응답 언어를 한국어 또는 영어로 설정합니다",
     "help": "은행 봇 사용법과 전체 명령어를 확인합니다",
     "admin currency delete": "관리자: 재화를 사용 중지하고 기존 기록을 보존합니다",
-    "market relist": "상장 폐지된 종목을 기존 기록과 함께 다시 상장합니다",
+    "admin market": "주식 상장, 평가 및 시장 관리",
+    "admin loan": "대출 신청 심사와 담보 처리",
+    "admin storage": "은행 보관 아이템 관리",
+    "admin requests": "은행 아이템 의뢰 관리",
+    "admin market relist": "상장 폐지된 종목을 기존 기록과 함께 다시 상장합니다",
 }
 PARAMETER_LABELS_KO = {
     "activity": "활동",
@@ -857,7 +863,25 @@ def localize_embed(embed: discord.Embed, language: str) -> discord.Embed:
 
 
 def build_message_embed(content: str) -> discord.Embed:
-    return discord.Embed(description=content[:1900] or "\u200b", color=BANK_GOLD)
+    return discord.Embed(description=content or "\u200b", color=BANK_GOLD)
+
+
+def split_message_text(content: str, limit: int = MESSAGE_CHUNK_LIMIT) -> list[str]:
+    """Split a response at line and word boundaries without dropping text."""
+    chunks: list[str] = []
+    remaining = content
+    while len(remaining) > limit:
+        newline = remaining.rfind("\n", 0, limit + 1)
+        if newline >= 0:
+            split_at = newline + 1
+        else:
+            space = remaining.rfind(" ", 0, limit + 1)
+            split_at = space if space > 0 else limit
+        chunks.append(remaining[:split_at])
+        remaining = remaining[split_at:]
+    if remaining or not chunks:
+        chunks.append(remaining)
+    return chunks
 
 
 async def send_public(
@@ -869,14 +893,16 @@ async def send_public(
     language: str | None = None,
 ) -> None:
     language = language or await get_user_language(interaction.user.id)
+    content_chunks: list[str] = []
     if content is not None:
         content = translate_message(content, language)
-        if len(content) > 1900:
-            omitted = "…some content was omitted." if language == "en" else "…내용이 길어 일부를 생략했습니다."
-            content = content[:1880] + "\n" + omitted
         if embed is None:
-            embed = build_message_embed(content)
+            content_chunks = split_message_text(content)
+            embed = build_message_embed(content_chunks.pop(0))
             content = None
+        elif len(content) > MESSAGE_CHUNK_LIMIT:
+            content_chunks = split_message_text(content)
+            content = content_chunks.pop(0)
     elif embed is None:
         embed = build_message_embed("\u200b")
     if embed is not None:
@@ -892,6 +918,8 @@ async def send_public(
         await interaction.followup.send(**message_options)
     else:
         await interaction.response.send_message(**message_options)
+    for chunk in content_chunks:
+        await interaction.followup.send(embed=build_message_embed(chunk))
 
 
 async def safe_command(interaction: discord.Interaction, action) -> None:
@@ -2069,16 +2097,38 @@ def build_category_embed(category_name: str, language: str) -> discord.Embed:
     commands = ACTION_COMMANDS_BY_CATEGORY.get(category_name)
     if commands is None:
         raise ValueError("명령 범주를 찾을 수 없습니다.")
+    page_count = max(1, (len(commands) + CATEGORY_PAGE_SIZE - 1) // CATEGORY_PAGE_SIZE)
+    return build_category_page_embed(category_name, language, 0, page_count)
+
+
+def build_category_page_embed(
+    category_name: str, language: str, page: int, page_count: int | None = None
+) -> discord.Embed:
+    commands = ACTION_COMMANDS_BY_CATEGORY.get(category_name)
+    if commands is None:
+        raise ValueError("명령 범주를 찾을 수 없습니다.")
+    page_count = page_count or max(
+        1, (len(commands) + CATEGORY_PAGE_SIZE - 1) // CATEGORY_PAGE_SIZE
+    )
+    page = min(max(page, 0), page_count - 1)
+    start = page * CATEGORY_PAGE_SIZE
+    page_commands = commands[start : start + CATEGORY_PAGE_SIZE]
     lines = [
-        f"{command.name} — {localized_command_description(command, language)}"
-        for command in commands
+        f"/{command.qualified_name} — {localized_command_description(command, language)}"
+        for command in page_commands
     ]
-    return discord.Embed(
+    embed = discord.Embed(
         title=CATEGORY_LABELS.get(category_name, {}).get(language, category_name),
         description="\n".join(lines)
         or ("No actions to display." if language == "en" else "표시할 명령이 없습니다."),
         color=BANK_GOLD,
     )
+    embed.set_footer(
+        text=f"Page {page + 1} of {page_count}"
+        if language == "en"
+        else f"{page + 1}/{page_count} 페이지"
+    )
+    return embed
 
 
 def build_member_select_embed(
@@ -2101,18 +2151,22 @@ def build_main_menu_embed(language: str) -> discord.Embed:
         return discord.Embed(
             title="ROBELLANK Bank",
             description=(
-                "Run commands directly from Discord's slash menu.\n"
-                "Account: `/profile balance` · Stocks: `/stocks stock list`\n"
-                "List a stock: `/market create` · Help: `/help` · Language: `/language`"
+                "Use the slash command group that matches what you need.\n"
+                "Bank: `/profile` · `/savings` · `/loan`\n"
+                "Items: `/storage` · `/requests`\n"
+                "Stocks: `/stocks` · `/market`\n"
+                "Admin: `/admin` · Help: `/help` · Language: `/language`"
             ),
             color=BANK_GOLD,
         )
     return discord.Embed(
         title="ROBELLANK 은행",
         description=(
-            "필요한 기능을 슬래시 명령어에서 바로 실행하세요.\n"
-            "계좌: `/profile balance` · 주식: `/stocks stock list`\n"
-            "주식 상장: `/market create` · 도움말: `/help` · 언어: `/language`"
+            "필요한 기능에 맞는 슬래시 명령어 범주를 사용하세요.\n"
+            "은행: `/profile` · `/savings` · `/loan`\n"
+            "아이템: `/storage` · `/requests`\n"
+            "주식: `/stocks` · `/market`\n"
+            "관리자: `/admin` · 도움말: `/help` · 언어: `/language`"
         ),
         color=BANK_GOLD,
     )
@@ -2746,16 +2800,25 @@ class BankActionModal(discord.ui.Modal):
 
 
 class CategoryActionView(discord.ui.View):
-    def __init__(self, owner_id: int, language: str, category: str):
+    def __init__(
+        self, owner_id: int, language: str, category: str, page: int = 0
+    ):
         super().__init__(timeout=300)
         self.owner_id = owner_id
         self.language = language
         self.category = category
+        self.page = page
         self.selected_path: str | None = None
         commands = [
             command
             for command in ACTION_COMMANDS_BY_CATEGORY.get(category, [])
-            if command.name != "menu"
+        ]
+        page_count = max(
+            1, (len(commands) + CATEGORY_PAGE_SIZE - 1) // CATEGORY_PAGE_SIZE
+        )
+        self.page = min(max(self.page, 0), page_count - 1)
+        page_commands = commands[
+            self.page * CATEGORY_PAGE_SIZE : (self.page + 1) * CATEGORY_PAGE_SIZE
         ]
         selector = discord.ui.Select(
             placeholder=(
@@ -2767,14 +2830,15 @@ class CategoryActionView(discord.ui.View):
             max_values=1,
             options=[
                 discord.SelectOption(
-                    label=command.name.replace("-", " ").title()[:100],
+                    label=command.qualified_name.replace("-", " ").title()[:100],
                     value=command.qualified_name,
                     description=localized_command_description(
                         command, language
                     )[:100],
                 )
-                for command in commands[:25]
+                for command in page_commands
             ],
+            row=0,
         )
 
         async def select_action(interaction: discord.Interaction) -> None:
@@ -2784,10 +2848,60 @@ class CategoryActionView(discord.ui.View):
         selector.callback = select_action
         self.add_item(selector)
 
+        if page_count > 1:
+            previous_button = discord.ui.Button(
+                label="Previous" if language == "en" else "이전",
+                style=discord.ButtonStyle.secondary,
+                disabled=self.page == 0,
+                row=1,
+            )
+
+            async def previous_page(interaction: discord.Interaction) -> None:
+                previous = max(0, self.page - 1)
+                await interaction.response.edit_message(
+                    embed=localize_embed(
+                        build_category_page_embed(
+                            category, language, previous, page_count
+                        ),
+                        language,
+                    ),
+                    view=CategoryActionView(
+                        self.owner_id, language, category, previous
+                    ),
+                )
+
+            previous_button.callback = previous_page
+            self.add_item(previous_button)
+
+            next_button = discord.ui.Button(
+                label="Next" if language == "en" else "다음",
+                style=discord.ButtonStyle.secondary,
+                disabled=self.page >= page_count - 1,
+                row=1,
+            )
+
+            async def next_page(interaction: discord.Interaction) -> None:
+                following = min(page_count - 1, self.page + 1)
+                await interaction.response.edit_message(
+                    embed=localize_embed(
+                        build_category_page_embed(
+                            category, language, following, page_count
+                        ),
+                        language,
+                    ),
+                    view=CategoryActionView(
+                        self.owner_id, language, category, following
+                    ),
+                )
+
+            next_button.callback = next_page
+            self.add_item(next_button)
+
         run_button = discord.ui.Button(
             label="Run selected action" if language == "en" else "선택한 기능 실행",
             style=discord.ButtonStyle.primary,
             custom_id=f"robellank-action-run:{category}",
+            row=2,
         )
 
         async def run_selected(interaction: discord.Interaction) -> None:
@@ -2808,6 +2922,7 @@ class CategoryActionView(discord.ui.View):
             label="Back to menu" if language == "en" else "메뉴로 돌아가기",
             style=discord.ButtonStyle.secondary,
             custom_id=f"robellank-action-back:{category}",
+            row=2,
         )
 
         async def go_back(interaction: discord.Interaction) -> None:
@@ -6319,13 +6434,45 @@ def organize_command_categories(tree: app_commands.CommandTree) -> None:
         "stocks": app_commands.Group(
             name="stocks", description="Virtual stock trading and holdings"
         ),
-        "market": app_commands.Group(
-            name="market", description="Stock listings, evaluations, and announcements"
-        ),
+        "market": app_commands.Group(name="market", description="Market announcements"),
         "admin": app_commands.Group(
             name="admin", description="Administrative bank settings and account controls"
         ),
     }
+    admin_subgroups = {
+        "market": app_commands.Group(
+            name="market",
+            description="Manage stock listings, evaluations, and market updates",
+        ),
+        "loan": app_commands.Group(
+            name="loan",
+            description="Review loan applications and manage collateral",
+        ),
+        "storage": app_commands.Group(
+            name="storage",
+            description="Manage items stored at the bank",
+        ),
+        "requests": app_commands.Group(
+            name="requests",
+            description="Manage bank item requests",
+        ),
+    }
+    for subgroup in admin_subgroups.values():
+        categories["admin"].add_command(subgroup)
+
+    def move_admin_commands(
+        source: app_commands.Group, destination: app_commands.Group
+    ) -> None:
+        for child in list(source.commands):
+            if isinstance(child, app_commands.Group) or not child.checks:
+                continue
+            command = source.get_command(child.name)
+            if command is None:
+                raise RuntimeError(
+                    f"Cannot find {child.name!r} while moving admin actions."
+                )
+            source.remove_command(child.name)
+            destination.add_command(command)
 
     direct_commands = {
         "profile": {
@@ -6462,7 +6609,15 @@ def organize_command_categories(tree: app_commands.CommandTree) -> None:
                     )
                 group.remove_command(child.name)
                 command.name = aliases[child.name]
-                categories[category_name].add_command(command)
+                if command.checks:
+                    subgroup_name = {
+                        "loan": "loan",
+                        "bank-request": "requests",
+                        "market": "market",
+                    }[old_name]
+                    admin_subgroups[subgroup_name].add_command(command)
+                else:
+                    categories[category_name].add_command(command)
             continue
         if old_name == "currency":
             public_list = group.get_command("list")
@@ -6473,6 +6628,8 @@ def organize_command_categories(tree: app_commands.CommandTree) -> None:
             categories["savings"].add_command(public_list)
         rename_group_commands(group, aliases)
         group.name = new_name
+        if old_name == "vault":
+            move_admin_commands(group, admin_subgroups["storage"])
         categories[category_name].add_command(group)
 
     # The older tier-config group has been replaced with one interactive setting panel.

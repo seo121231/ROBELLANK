@@ -47,7 +47,7 @@ Discord 서버에서 가상 통화·계좌와 길드 가상주식 시장을 운�
 ## User preferences
 
 - Normal bot replies default to Korean. Slash command names remain English; command explanations in bot menus and forms follow each user's saved language. Discord's native slash-command picker descriptions follow each user's Discord client locale. `/help` lists command names only, one per line.
-- Keep 8–15 top-level slash command entry points. Use text-only menu guidance; reserve buttons for confirmations and settings.
+- Keep 8–15 top-level slash command entry points. Use text-only menu guidance; reserve buttons for confirmations and settings. Keep the main command groups broad, and place every administrator-only command under `/admin`, grouped by function.
 - The investment system is a guild virtual-stock exchange based on the supplied ROBELLANK operating rules, not fixed-term investment products.
 
 ## Gotchas

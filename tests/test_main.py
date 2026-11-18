@@ -286,12 +286,16 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             "currencies",
             {command.name for command in main.ACTION_COMMANDS_BY_CATEGORY["savings"]},
         )
-        self.assertTrue(
-            all(
-                len(actions) <= 25
-                for actions in main.ACTION_COMMANDS_BY_CATEGORY.values()
-            )
-        )
+        groups = []
+        for root in main.bot.tree.get_commands():
+            if isinstance(root, main.app_commands.Group):
+                groups.append(root)
+                groups.extend(
+                    command
+                    for command in root.walk_commands()
+                    if isinstance(command, main.app_commands.Group)
+                )
+        self.assertTrue(all(len(group.commands) <= 25 for group in groups))
         self.assertTrue(
             all(
                 isinstance(main.bot.tree.get_command(name), main.app_commands.Group)
@@ -299,17 +303,20 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertIsNotNone(main.get_command_by_path("stocks stock buy"))
-        self.assertIsNotNone(main.get_command_by_path("market create"))
+        self.assertIsNotNone(main.get_command_by_path("admin market create"))
+        self.assertIsNotNone(main.get_command_by_path("market news"))
+        with self.assertRaisesRegex(ValueError, "Command path is not registered"):
+            main.get_command_by_path("market create")
 
-    def test_stock_creation_command_is_available_under_market(self):
-        command = main.ACTION_COMMANDS_BY_PATH.get("market create")
+    def test_stock_creation_command_is_available_under_admin_market(self):
+        command = main.ACTION_COMMANDS_BY_PATH.get("admin market create")
 
         self.assertIsNotNone(command)
         self.assertEqual(
             [parameter.name for parameter in command.parameters],
             ["name", "description", "price", "initial_shares", "holder", "reason"],
         )
-        self.assertIn(command, main.ACTION_COMMANDS_BY_CATEGORY["market"])
+        self.assertIn(command, main.ACTION_COMMANDS_BY_CATEGORY["admin"])
 
     def test_documented_core_features_have_registered_commands(self):
         required_paths = {
@@ -322,20 +329,20 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             "savings deposit",
             "loan request",
             "loan repay",
-            "loan approve",
+            "admin loan approve",
             "storage vault list",
-            "storage vault add",
+            "admin storage add",
             "requests submit",
-            "requests update",
+            "admin requests update",
             "stocks stock list",
             "stocks stock quote",
             "stocks stock buy",
             "stocks stock sell",
             "stocks stock cancel",
             "stocks portfolio",
-            "market create",
-            "market evaluate",
-            "market publish",
+            "admin market create",
+            "admin market evaluate",
+            "admin market publish",
             "market news",
             "admin currency create",
             "admin currency setrate",
@@ -359,15 +366,12 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             {"ko", "en"},
         )
 
-    def test_menu_is_text_only_and_lists_direct_commands(self):
+    def test_menu_shows_broad_command_categories_as_text(self):
         embed = main.build_main_menu_embed("ko")
-        menu = main.bot.tree.get_command("menu")
 
-        self.assertIsNotNone(menu)
-        self.assertIn("/profile balance", embed.description)
-        self.assertIn("/stocks stock list", embed.description)
-        self.assertIn("/market create", embed.description)
-        self.assertNotIn("버튼", embed.description)
+        self.assertIn("은행: `/profile` · `/savings` · `/loan`", embed.description)
+        self.assertIn("아이템: `/storage` · `/requests`", embed.description)
+        self.assertIn("관리자: `/admin`", embed.description)
 
     def test_direct_slash_commands_resolve_without_menu_shortcuts(self):
         paths = list(main.MENU_COMMAND_PATHS.values())
@@ -389,12 +393,12 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(set(modal.inputs), {field[0] for field in fields})
             self.assertLessEqual(len(modal.children), 5)
         evaluation = main.CommandActionModal(
-            123456, main.get_command_by_path("market evaluate")
+            123456, main.get_command_by_path("admin market evaluate")
         )
         self.assertEqual(len(evaluation.children), 5)
         next_page = main.CommandActionModal(
             123456,
-            main.get_command_by_path("market evaluate"),
+            main.get_command_by_path("admin market evaluate"),
             values={
                 "stock": "Example",
                 "content": 1,
@@ -481,13 +485,13 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(modal.inputs), {"currency", "amount"})
 
     def test_native_stock_command_descriptions_follow_the_saved_language(self):
-        command = main.ACTION_COMMANDS_BY_PATH["market create"]
+        command = main.ACTION_COMMANDS_BY_PATH["admin market create"]
 
         self.assertRegex(main.localized_command_description(command, "ko"), r"[가-힣]")
         self.assertNotRegex(main.localized_command_description(command, "en"), r"[가-힣]")
 
     async def test_action_modal_parses_choices_and_enforces_numeric_ranges(self):
-        evaluation = main.get_command_by_path("market evaluate")
+        evaluation = main.get_command_by_path("admin market evaluate")
         modal = main.CommandActionModal(123456, evaluation)
         score_parameter = next(
             parameter for parameter in evaluation.parameters if parameter.name == "content"
@@ -499,7 +503,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await modal.parse_value(SimpleNamespace(), score_parameter, "7")
 
-        rumor = main.get_command_by_path("market rumor")
+        rumor = main.get_command_by_path("admin market rumor")
         kind_parameter = next(
             parameter for parameter in rumor.parameters if parameter.name == "kind"
         )
@@ -842,7 +846,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             interaction, "Your bot language is now English.", language="en"
         )
 
-    async def test_menu_command_sends_no_buttons(self):
+    async def test_menu_command_keeps_category_guidance_text_only(self):
         interaction = SimpleNamespace(user=SimpleNamespace(id=123456))
         with (
             patch.object(main, "get_user_language", AsyncMock(return_value="ko")),
@@ -853,8 +857,31 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         send_public.assert_awaited_once()
         self.assertNotIn("view", send_public.await_args.kwargs)
         self.assertIn(
-            "/market create",
+            "관리자: `/admin`",
             send_public.await_args.kwargs["embed"].description,
+        )
+
+    def test_category_menu_paginates_without_truncating_admin_actions(self):
+        commands = main.ACTION_COMMANDS_BY_CATEGORY["admin"]
+        page_count = (
+            len(commands) + main.CATEGORY_PAGE_SIZE - 1
+        ) // main.CATEGORY_PAGE_SIZE
+
+        displayed_paths = []
+        for page in range(page_count):
+            embed = main.build_category_page_embed("admin", "ko", page)
+            self.assertLessEqual(len(embed.description), main.MESSAGE_CHUNK_LIMIT)
+            displayed_paths.extend(
+                line.split(" — ", 1)[0].removeprefix("/")
+                for line in embed.description.splitlines()
+            )
+
+        self.assertEqual(set(displayed_paths), {command.qualified_name for command in commands})
+        admin_view = main.CategoryActionView(123456, "ko", "admin")
+        self.assertTrue(any(isinstance(item, main.discord.ui.Button) for item in admin_view.children))
+        self.assertEqual(
+            len(admin_view.children[0].options),
+            min(len(commands), main.CATEGORY_PAGE_SIZE),
         )
 
     async def test_all_public_command_replies_use_the_saved_language(self):
@@ -902,6 +929,34 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("view", message_options)
         self.assertFalse(message_options["ephemeral"])
 
+    async def test_long_public_messages_are_split_without_dropping_text(self):
+        text = ("긴 공지 문장을 충분히 반복합니다.\n" * 180).rstrip()
+        response = SimpleNamespace(
+            is_done=lambda: False,
+            send_message=AsyncMock(),
+        )
+        followup = SimpleNamespace(send=AsyncMock())
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=123456),
+            response=response,
+            followup=followup,
+        )
+
+        await main.send_public(interaction, text, language="ko")
+
+        sent_chunks = [
+            response.send_message.await_args.kwargs["embed"].description,
+            *[
+                call.kwargs["embed"].description
+                for call in followup.send.await_args_list
+            ],
+        ]
+        self.assertGreater(len(sent_chunks), 1)
+        self.assertTrue(
+            all(len(chunk) <= main.MESSAGE_CHUNK_LIMIT for chunk in sent_chunks)
+        )
+        self.assertEqual("".join(sent_chunks), text)
+
     async def test_send_public_recolors_existing_embeds_gold(self):
         response = SimpleNamespace(
             is_done=lambda: False,
@@ -941,7 +996,7 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ephemeral_true_calls, [])
 
     def test_market_channel_uses_text_autocomplete_and_is_admin_only(self):
-        channel_command = main.ACTION_COMMANDS_BY_PATH["market channel"]
+        channel_command = main.ACTION_COMMANDS_BY_PATH["admin market channel"]
         channel_parameter = channel_command.parameters[0]
 
         self.assertEqual(
@@ -972,14 +1027,28 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
     def test_currency_delete_and_stock_relist_actions_are_admin_only(self):
         currency_delete = main.ACTION_COMMANDS_BY_PATH["admin currency delete"]
         currency_remove = main.ACTION_COMMANDS_BY_PATH["admin currency remove"]
-        market_relist = main.ACTION_COMMANDS_BY_PATH["market relist"]
+        market_relist = main.ACTION_COMMANDS_BY_PATH["admin market relist"]
 
         self.assertTrue(currency_delete.checks)
         self.assertTrue(currency_remove.checks)
         self.assertTrue(market_relist.checks)
         self.assertIn(currency_delete, main.ACTION_COMMANDS_BY_CATEGORY["admin"])
-        self.assertIn(market_relist, main.ACTION_COMMANDS_BY_CATEGORY["market"])
+        self.assertIn(market_relist, main.ACTION_COMMANDS_BY_CATEGORY["admin"])
         self.assertIn("delete", currency_delete.name)
+
+    def test_every_admin_only_action_is_nested_under_admin(self):
+        admin_only = [
+            command
+            for command in main.ACTION_COMMANDS_BY_PATH.values()
+            if command.checks
+        ]
+
+        self.assertGreater(len(admin_only), 20)
+        self.assertTrue(
+            all(command.qualified_name.startswith("admin ") for command in admin_only)
+        )
+        self.assertFalse(main.ACTION_COMMANDS_BY_PATH["market news"].checks)
+        self.assertFalse(main.ACTION_COMMANDS_BY_PATH["loan request"].checks)
 
     def test_currency_removal_and_relisting_confirmations_are_translated(self):
         currency_message = (
