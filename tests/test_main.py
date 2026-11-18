@@ -13,6 +13,9 @@ class FakeConnection:
     def __init__(self):
         self.language = None
         self.execute_args = None
+        self.fetch_rows = []
+        self.fetch_query = None
+        self.fetch_args = None
 
     async def fetchval(self, query, user_id):
         self.fetch_user_id = user_id
@@ -21,6 +24,11 @@ class FakeConnection:
     async def execute(self, query, user_id, language):
         self.execute_args = (user_id, language)
         self.language = language
+
+    async def fetch(self, query, *args):
+        self.fetch_query = query
+        self.fetch_args = args
+        return self.fetch_rows
 
 
 class FakeAcquire:
@@ -1007,6 +1015,145 @@ class BankBotHelpersTest(unittest.IsolatedAsyncioTestCase):
             channel_command.description.startswith(main.ADMIN_DESCRIPTION_PREFIX)
         )
         self.assertEqual(len(channel_command.checks), 1)
+
+    async def test_currency_autocomplete_shows_symbol_and_returns_canonical_name(self):
+        pool = FakePool()
+        pool.connection.fetch_rows = [{"name": "벨", "symbol": "BELL"}]
+        interaction = SimpleNamespace(
+            guild_id=123,
+            user=SimpleNamespace(id=456),
+            locale=main.discord.Locale.korean,
+        )
+
+        with patch.object(main, "pool", pool, create=True):
+            choices = await main.currency_autocomplete(interaction, "bell")
+
+        self.assertEqual([(choice.name, choice.value) for choice in choices], [("벨 · BELL", "벨")])
+        self.assertEqual(pool.connection.fetch_args, ("123", "bell"))
+
+    async def test_order_autocomplete_only_suggests_the_current_users_open_orders(self):
+        pool = FakePool()
+        pool.connection.fetch_rows = [
+            {
+                "id": 17,
+                "name": "Alpha",
+                "side": "buy",
+                "remaining": 3,
+                "limit_price": 200,
+            }
+        ]
+        interaction = SimpleNamespace(
+            guild_id=123,
+            user=SimpleNamespace(id=456),
+            locale=main.discord.Locale.korean,
+        )
+
+        with patch.object(main, "pool", pool, create=True):
+            choices = await main.order_id_autocomplete(interaction, 17)
+
+        self.assertEqual(choices[0].value, 17)
+        self.assertIn("#17 · Alpha · 매수", choices[0].name)
+        self.assertEqual(pool.connection.fetch_args, ("123", "456", "17"))
+        self.assertIn("a.discord_user_id=$2", pool.connection.fetch_query)
+        self.assertIn("o.status IN ('open','partial')", pool.connection.fetch_query)
+
+    async def test_admin_loan_autocomplete_only_suggests_pending_credit_loans(self):
+        pool = FakePool()
+        pool.connection.fetch_rows = [
+            {
+                "id": 27,
+                "loan_type": "credit",
+                "principal": 5000,
+                "collateral_item": None,
+                "discord_user_id": "987654321",
+            }
+        ]
+        interaction = SimpleNamespace(
+            guild_id=123,
+            user=SimpleNamespace(
+                id=456,
+                guild_permissions=SimpleNamespace(
+                    administrator=True, manage_guild=False
+                ),
+                roles=[],
+            ),
+            guild=None,
+            locale=main.discord.Locale.american_english,
+        )
+
+        with patch.object(main, "pool", pool, create=True):
+            choices = await main.pending_credit_loan_autocomplete(interaction, "")
+
+        self.assertEqual(choices[0].value, 27)
+        self.assertIn("987654321", choices[0].name)
+        self.assertIn("l.status='pending' AND l.loan_type='credit'", pool.connection.fetch_query)
+
+    async def test_market_publish_autocomplete_includes_delisted_pending_evaluations(self):
+        pool = FakePool()
+        pool.connection.fetch_rows = [
+            {"name": "Alpha", "current_price": 120, "listed": False}
+        ]
+        interaction = SimpleNamespace(
+            guild_id=123,
+            user=SimpleNamespace(
+                id=456,
+                guild_permissions=SimpleNamespace(
+                    administrator=True, manage_guild=False
+                ),
+                roles=[],
+            ),
+            locale=main.discord.Locale.american_english,
+        )
+
+        with patch.object(main, "pool", pool, create=True):
+            choices = await main.market_publish_stock_autocomplete(interaction, "")
+
+        self.assertIn("Alpha · 120 · delisted", choices[0].name)
+        self.assertIn("e.evaluation_date=$2", pool.connection.fetch_query)
+        self.assertIn("e.status='pending'", pool.connection.fetch_query)
+        self.assertNotIn("::date", pool.connection.fetch_query)
+
+    async def test_admin_autocomplete_does_not_expose_data_to_regular_members(self):
+        pool = FakePool()
+        interaction = SimpleNamespace(
+            guild_id=123,
+            user=SimpleNamespace(
+                id=456,
+                guild_permissions=SimpleNamespace(
+                    administrator=False, manage_guild=False
+                ),
+                roles=[],
+            ),
+        )
+
+        with patch.object(main, "pool", pool, create=True):
+            choices = await main.pending_loan_autocomplete(interaction, "")
+
+        self.assertEqual(choices, [])
+        self.assertIsNone(pool.connection.fetch_query)
+
+    def test_autocomplete_is_attached_to_all_approved_lookup_inputs(self):
+        expected = {
+            "savings exchange": {"from_currency", "to"},
+            "admin currency create": {"name"},
+            "stocks stock cancel": {"order_id"},
+            "admin loan approve": {"loan_id"},
+            "admin loan collateral-approve": {"loan_id"},
+            "admin loan reject": {"loan_id"},
+            "admin loan collateral-return": {"loan_id"},
+            "admin requests update": {"request_id"},
+            "admin market relist": {"stock"},
+        }
+
+        for path, parameter_names in expected.items():
+            command = main.ACTION_COMMANDS_BY_PATH[path]
+            with self.subTest(path=path):
+                for parameter in command.parameters:
+                    if parameter.name in parameter_names:
+                        self.assertTrue(
+                            callable(parameter._Parameter__parent.autocomplete),
+                            f"{path}.{parameter.name} has no autocomplete",
+                        )
 
     def test_admin_commands_are_labeled_and_restricted_in_discord(self):
         other = main.bot.tree.get_command("admin")

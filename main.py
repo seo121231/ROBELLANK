@@ -6060,6 +6060,434 @@ async def announcement_channel_autocomplete(
     ]
 
 
+async def autocomplete_fetch(
+    interaction: discord.Interaction,
+    query: str,
+    *parameters: object,
+) -> list[asyncpg.Record]:
+    if interaction.guild_id is None:
+        return []
+    try:
+        async with pool.acquire() as conn:
+            return await conn.fetch(query, str(interaction.guild_id), *parameters)
+    except asyncpg.PostgresError:
+        command = getattr(interaction.command, "qualified_name", "unknown")
+        logger.warning(
+            "Autocomplete lookup failed for %s",
+            command,
+            exc_info=True,
+        )
+        return []
+
+
+def autocomplete_search(current: str | None) -> str:
+    return (current or "").strip()
+
+
+def autocomplete_id_search(current: str | int) -> str:
+    return str(current).strip().lstrip("#").strip()
+
+
+def autocomplete_is_english(interaction: discord.Interaction) -> bool:
+    return str(getattr(interaction, "locale", "")).startswith("en")
+
+
+async def currency_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    search = autocomplete_search(current)
+    rows = await autocomplete_fetch(
+        interaction,
+        """SELECT name,symbol FROM bank_currencies
+             WHERE guild_id=$1 AND active=true
+               AND ($2='' OR name ILIKE '%' || $2 || '%'
+                         OR symbol ILIKE '%' || $2 || '%')
+             ORDER BY is_base DESC,lower(name),name LIMIT 25""",
+        search,
+    )
+    return [
+        app_commands.Choice(
+            name=f"{row['name']} · {row['symbol']}"[:100],
+            value=row["name"],
+        )
+        for row in rows
+    ]
+
+
+async def credit_loan_currency_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    search = autocomplete_search(current)
+    rows = await autocomplete_fetch(
+        interaction,
+        """SELECT name,symbol FROM bank_currencies
+             WHERE guild_id=$1 AND active=true AND lower(name)=lower('벨')
+               AND ($2='' OR name ILIKE '%' || $2 || '%'
+                         OR symbol ILIKE '%' || $2 || '%')
+             LIMIT 25""",
+        search,
+    )
+    return [
+        app_commands.Choice(
+            name=f"{row['name']} · {row['symbol']}"[:100],
+            value=row["name"],
+        )
+        for row in rows
+    ]
+
+
+async def admin_currency_name_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    if not has_server_admin_access(interaction.user):
+        return []
+    search = autocomplete_search(current)
+    rows = await autocomplete_fetch(
+        interaction,
+        """SELECT name,symbol,active FROM bank_currencies
+             WHERE guild_id=$1
+               AND ($2='' OR name ILIKE '%' || $2 || '%'
+                         OR symbol ILIKE '%' || $2 || '%')
+             ORDER BY active DESC,is_base DESC,lower(name),name LIMIT 25""",
+        search,
+    )
+    english = autocomplete_is_english(interaction)
+    choices = []
+    for row in rows:
+        state = (
+            ("active" if row["active"] else "inactive")
+            if english
+            else ("사용 중" if row["active"] else "중지")
+        )
+        choices.append(
+            app_commands.Choice(
+                name=f"{row['name']} · {row['symbol']} · {state}"[:100],
+                value=row["name"],
+            )
+        )
+    return choices
+
+
+def stock_choices(
+    interaction: discord.Interaction, rows: list[asyncpg.Record]
+) -> list[app_commands.Choice[str]]:
+    english = autocomplete_is_english(interaction)
+    return [
+        app_commands.Choice(
+            name=(
+                f"{row['name']} · {fmt(row['current_price'])}"
+                + (
+                    f" · {'listed' if row['listed'] else 'delisted'}"
+                    if english
+                    else f" · {'상장' if row['listed'] else '폐지'}"
+                )
+            )[:100],
+            value=row["name"],
+        )
+        for row in rows
+    ]
+
+
+async def stock_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+    *,
+    listed: bool | None = None,
+) -> list[app_commands.Choice[str]]:
+    search = autocomplete_search(current)
+    rows = await autocomplete_fetch(
+        interaction,
+        """SELECT name,current_price,listed FROM bank_stocks
+             WHERE guild_id=$1 AND ($2::boolean IS NULL OR listed=$2)
+               AND ($3='' OR name ILIKE '%' || $3 || '%')
+             ORDER BY listed DESC,lower(name),name LIMIT 25""",
+        listed,
+        search,
+    )
+    return stock_choices(interaction, rows)
+
+
+async def listed_stock_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    return await stock_autocomplete(interaction, current, listed=True)
+
+
+async def admin_stock_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    if not has_server_admin_access(interaction.user):
+        return []
+    return await stock_autocomplete(interaction, current)
+
+
+async def admin_listed_stock_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    if not has_server_admin_access(interaction.user):
+        return []
+    return await stock_autocomplete(interaction, current, listed=True)
+
+
+async def market_publish_stock_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    if not has_server_admin_access(interaction.user):
+        return []
+    search = autocomplete_search(current)
+    today = datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat()
+    rows = await autocomplete_fetch(
+        interaction,
+        """SELECT s.name,s.current_price,s.listed FROM bank_stocks s
+             WHERE s.guild_id=$1
+               AND (s.listed=true OR EXISTS (
+                    SELECT 1 FROM bank_stock_evaluations e
+                     WHERE e.stock_id=s.id AND e.evaluation_date=$2
+                       AND e.status='pending'))
+               AND ($3='' OR s.name ILIKE '%' || $3 || '%')
+             ORDER BY s.listed DESC,lower(s.name),s.name LIMIT 25""",
+        today,
+        search,
+    )
+    return stock_choices(interaction, rows)
+
+
+async def admin_delisted_stock_autocomplete(
+    interaction: discord.Interaction, current: str
+) -> list[app_commands.Choice[str]]:
+    if not has_server_admin_access(interaction.user):
+        return []
+    return await stock_autocomplete(interaction, current, listed=False)
+
+
+async def order_id_autocomplete(
+    interaction: discord.Interaction, current: str | int
+) -> list[app_commands.Choice[int]]:
+    search = autocomplete_id_search(current)
+    rows = await autocomplete_fetch(
+        interaction,
+        """SELECT o.id,s.name,o.side,o.remaining,o.limit_price
+             FROM bank_stock_orders o
+             JOIN bank_accounts a ON a.id=o.account_id AND a.guild_id=o.guild_id
+             JOIN bank_stocks s ON s.id=o.stock_id
+            WHERE o.guild_id=$1 AND a.discord_user_id=$2
+              AND o.status IN ('open','partial')
+              AND ($3='' OR o.id::text ILIKE '%' || $3 || '%'
+                        OR s.name ILIKE '%' || $3 || '%')
+            ORDER BY o.created_at DESC,o.id DESC LIMIT 25""",
+        str(interaction.user.id),
+        search,
+    )
+    english = autocomplete_is_english(interaction)
+    choices = []
+    for row in rows:
+        side = (
+            ("Buy" if row["side"] == "buy" else "Sell")
+            if english
+            else ("매수" if row["side"] == "buy" else "매도")
+        )
+        unit = "shares" if english else "주"
+        choices.append(
+            app_commands.Choice(
+                name=(
+                    f"#{row['id']} · {row['name']} · {side} · "
+                    f"{fmt(row['remaining'])} {unit} @ {fmt(row['limit_price'])}"
+                )[:100],
+                value=int(row["id"]),
+            )
+        )
+    return choices
+
+
+async def personal_loan_autocomplete(
+    interaction: discord.Interaction, current: str | int
+) -> list[app_commands.Choice[int]]:
+    search = autocomplete_id_search(current)
+    rows = await autocomplete_fetch(
+        interaction,
+        """SELECT l.id,l.loan_type,l.amount_due,l.collateral_item
+             FROM bank_loans l
+             JOIN bank_accounts a ON a.id=l.account_id AND a.guild_id=l.guild_id
+            WHERE l.guild_id=$1 AND a.discord_user_id=$2
+              AND l.status='approved' AND l.amount_due>0
+              AND ($3='' OR l.id::text ILIKE '%' || $3 || '%'
+                        OR COALESCE(l.collateral_item,'') ILIKE '%' || $3 || '%')
+            ORDER BY l.id DESC LIMIT 25""",
+        str(interaction.user.id),
+        search,
+    )
+    english = autocomplete_is_english(interaction)
+    return [
+        app_commands.Choice(
+            name=(
+                f"#{row['id']} · "
+                f"{'Collateral' if row['loan_type'] == 'collateral' else 'Credit'} · "
+                f"{fmt(row['amount_due'])} Bell"
+                if english
+                else f"#{row['id']} · "
+                f"{'담보' if row['loan_type'] == 'collateral' else '신용'} · "
+                f"남은 원리금 {fmt(row['amount_due'])}벨"
+            )[:100],
+            value=int(row["id"]),
+        )
+        for row in rows
+    ]
+
+
+async def extendable_loan_autocomplete(
+    interaction: discord.Interaction, current: str | int
+) -> list[app_commands.Choice[int]]:
+    if not tier_at_least(tier_for(interaction.user), "silver"):
+        return []
+    search = autocomplete_id_search(current)
+    rows = await autocomplete_fetch(
+        interaction,
+        """SELECT l.id,l.loan_type,l.amount_due
+             FROM bank_loans l
+             JOIN bank_accounts a ON a.id=l.account_id AND a.guild_id=l.guild_id
+             LEFT JOIN bank_tier_settings ts ON ts.guild_id=l.guild_id
+            WHERE l.guild_id=$1 AND a.discord_user_id=$2
+              AND l.status='approved' AND l.due_at IS NOT NULL
+              AND ts.loan_extension_days > 0 AND ts.loan_extension_limit > 0
+              AND l.extension_count < ts.loan_extension_limit
+              AND ($3='' OR l.id::text ILIKE '%' || $3 || '%')
+            ORDER BY l.id DESC LIMIT 25""",
+        str(interaction.user.id),
+        search,
+    )
+    english = autocomplete_is_english(interaction)
+    return [
+        app_commands.Choice(
+            name=(
+                f"#{row['id']} · "
+                f"{'Collateral' if row['loan_type'] == 'collateral' else 'Credit'} · "
+                f"{fmt(row['amount_due'])} Bell"
+                if english
+                else f"#{row['id']} · "
+                f"{'담보' if row['loan_type'] == 'collateral' else '신용'} · "
+                f"{fmt(row['amount_due'])}벨"
+            )[:100],
+            value=int(row["id"]),
+        )
+        for row in rows
+    ]
+
+
+async def admin_loan_autocomplete(
+    interaction: discord.Interaction, current: str | int, mode: str
+) -> list[app_commands.Choice[int]]:
+    if not has_server_admin_access(interaction.user):
+        return []
+    conditions = {
+        "credit": "l.status='pending' AND l.loan_type='credit'",
+        "collateral": "l.status='pending' AND l.loan_type='collateral'",
+        "pending": "l.status='pending'",
+        "return": (
+            "l.loan_type='collateral' AND l.status='repaid' "
+            "AND l.collateral_status='return_due'"
+        ),
+    }
+    condition = conditions[mode]
+    search = autocomplete_id_search(current)
+    rows = await autocomplete_fetch(
+        interaction,
+        f"""SELECT l.id,l.loan_type,l.principal,l.collateral_item,a.discord_user_id
+              FROM bank_loans l JOIN bank_accounts a ON a.id=l.account_id
+             WHERE l.guild_id=$1 AND {condition}
+               AND ($2='' OR l.id::text ILIKE '%' || $2 || '%'
+                         OR COALESCE(l.collateral_item,'') ILIKE '%' || $2 || '%')
+             ORDER BY l.created_at,l.id LIMIT 25""",
+        search,
+    )
+    english = autocomplete_is_english(interaction)
+    guild = interaction.guild
+    choices = []
+    for row in rows:
+        member = (
+            guild.get_member(int(row["discord_user_id"]))
+            if guild is not None
+            else None
+        )
+        member_name = (
+            member.display_name
+            if member
+            else f"<@{row['discord_user_id']}>"
+        )
+        if english:
+            loan_type = (
+                "Collateral" if row["loan_type"] == "collateral" else "Credit"
+            )
+        else:
+            loan_type = "담보" if row["loan_type"] == "collateral" else "신용"
+        choices.append(
+            app_commands.Choice(
+                name=(
+                    f"#{row['id']} · {member_name} · {loan_type} · "
+                    f"{fmt(row['principal'])} {'Bell' if english else '벨'}"
+                )[:100],
+                value=int(row["id"]),
+            )
+        )
+    return choices
+
+
+async def pending_credit_loan_autocomplete(
+    interaction: discord.Interaction, current: str | int
+) -> list[app_commands.Choice[int]]:
+    return await admin_loan_autocomplete(interaction, current, "credit")
+
+
+async def pending_collateral_loan_autocomplete(
+    interaction: discord.Interaction, current: str | int
+) -> list[app_commands.Choice[int]]:
+    return await admin_loan_autocomplete(interaction, current, "collateral")
+
+
+async def pending_loan_autocomplete(
+    interaction: discord.Interaction, current: str | int
+) -> list[app_commands.Choice[int]]:
+    return await admin_loan_autocomplete(interaction, current, "pending")
+
+
+async def returnable_collateral_loan_autocomplete(
+    interaction: discord.Interaction, current: str | int
+) -> list[app_commands.Choice[int]]:
+    return await admin_loan_autocomplete(interaction, current, "return")
+
+
+async def request_id_autocomplete(
+    interaction: discord.Interaction, current: str | int
+) -> list[app_commands.Choice[int]]:
+    if not has_server_admin_access(interaction.user):
+        return []
+    search = autocomplete_id_search(current)
+    rows = await autocomplete_fetch(
+        interaction,
+        """SELECT id,item_name,quantity,status
+             FROM bank_item_requests
+            WHERE guild_id=$1 AND status IN ('pending','accepted')
+              AND ($2='' OR id::text ILIKE '%' || $2 || '%'
+                        OR item_name ILIKE '%' || $2 || '%')
+            ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END,created_at
+            LIMIT 25""",
+        search,
+    )
+    english = autocomplete_is_english(interaction)
+    return [
+        app_commands.Choice(
+            name=(
+                f"#{row['id']} · {row['item_name']} × {fmt(row['quantity'])} · "
+                f"{'Pending' if row['status'] == 'pending' else 'Accepted'}"
+                if english
+                else f"#{row['id']} · {row['item_name']} × {fmt(row['quantity'])}개 · "
+                f"{'대기' if row['status'] == 'pending' else '수락'}"
+            )[:100],
+            value=int(row["id"]),
+        )
+        for row in rows
+    ]
+
+
 def resolve_announcement_channel(
     guild: discord.Guild, value: str
 ) -> discord.TextChannel:
@@ -6660,9 +7088,64 @@ def register_menu_command_tree(tree: app_commands.CommandTree) -> None:
             ACTION_COMMANDS_BY_CATEGORY.setdefault(category, []).append(command)
 
 
+def register_command_autocomplete() -> None:
+    bindings = {
+        "profile leaderboard": {"currency": currency_autocomplete},
+        "savings transfer": {"currency": currency_autocomplete},
+        "savings exchange": {
+            "from_currency": currency_autocomplete,
+            "to": currency_autocomplete,
+        },
+        "savings deposit": {"currency": currency_autocomplete},
+        "loan request": {"currency": credit_loan_currency_autocomplete},
+        "loan repay": {"loan_id": personal_loan_autocomplete},
+        "loan extend": {"loan_id": extendable_loan_autocomplete},
+        "stocks stock quote": {"stock": listed_stock_autocomplete},
+        "stocks stock buy": {"stock": listed_stock_autocomplete},
+        "stocks stock sell": {"stock": listed_stock_autocomplete},
+        "stocks stock cancel": {"order_id": order_id_autocomplete},
+        "admin mint": {"currency": currency_autocomplete},
+        "admin confiscate": {"currency": currency_autocomplete},
+        "admin supply": {"currency": currency_autocomplete},
+        "admin currency create": {"name": admin_currency_name_autocomplete},
+        "admin currency setbase": {"currency": currency_autocomplete},
+        "admin currency setvalue": {"currency": currency_autocomplete},
+        "admin currency setrate": {"currency": currency_autocomplete},
+        "admin currency remove": {"currency": currency_autocomplete},
+        "admin currency delete": {"currency": currency_autocomplete},
+        "admin loan approve": {"loan_id": pending_credit_loan_autocomplete},
+        "admin loan collateral-approve": {
+            "loan_id": pending_collateral_loan_autocomplete
+        },
+        "admin loan reject": {"loan_id": pending_loan_autocomplete},
+        "admin loan collateral-return": {
+            "loan_id": returnable_collateral_loan_autocomplete
+        },
+        "admin requests update": {"request_id": request_id_autocomplete},
+        "admin market describe": {"stock": admin_stock_autocomplete},
+        "admin market issue": {"stock": admin_stock_autocomplete},
+        "admin market burn": {"stock": admin_stock_autocomplete},
+        "admin market relist": {"stock": admin_delisted_stock_autocomplete},
+        "admin market remove": {"stock": admin_listed_stock_autocomplete},
+        "admin market evaluate": {"stock": admin_stock_autocomplete},
+        "admin market publish": {"stock": market_publish_stock_autocomplete},
+        "admin market rumor": {"stock_name": admin_listed_stock_autocomplete},
+        "admin market note": {"stock": admin_stock_autocomplete},
+        "admin market officer-add": {"stock": admin_stock_autocomplete},
+        "admin market officer-remove": {"stock": admin_stock_autocomplete},
+    }
+    for path, parameters in bindings.items():
+        command = ACTION_COMMANDS_BY_PATH.get(path)
+        if command is None:
+            raise RuntimeError(f"Cannot attach autocomplete to {path!r}.")
+        for parameter, callback in parameters.items():
+            command.autocomplete(parameter)(callback)
+
+
 organize_command_categories(bot.tree)
 register_menu_command_tree(bot.tree)
 configure_command_registry(bot.tree)
+register_command_autocomplete()
 
 
 async def main() -> None:
